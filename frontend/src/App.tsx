@@ -9,6 +9,7 @@ import { BackendHealthBadge } from './components/BackendHealthBadge';
 import { InvestigationConversationPanel } from './components/InvestigationConversationPanel';
 import { InvestigationReviewPanel } from './components/InvestigationReviewPanel';
 import { VerificationPanel } from './components/VerificationPanel';
+import { CoercionAnalysisPanel } from './components/CoercionAnalysisPanel';
 import {
   evaluateRiskApi,
   evaluateRiskLocally,
@@ -2625,6 +2626,7 @@ function TransactionDrawer({
               riskLevel={tx.assessment?.risk_level ?? null}
             />
             <VerificationPanel transactionId={tx.id} />
+            <CoercionAnalysisPanel transactionId={tx.id} />
             <InvestigationConversationPanel
               transactionId={tx.id}
               transactionRecipient={tx.recipient}

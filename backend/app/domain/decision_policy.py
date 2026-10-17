@@ -83,6 +83,20 @@ class VerificationSignal:
 
 
 @dataclass(frozen=True)
+class CoercionSignal:
+    """Structured coercion and duress intelligence evaluated by policy (P2-A6)."""
+
+    available: bool = False
+    provider_failed: bool = False
+    has_explicit_coercion: bool = False
+    coercion_severity: str | None = None  # CRITICAL, HIGH, MEDIUM, LOW
+    has_legitimate_explanation: bool = False
+    voice_stress_only: bool = False
+    finding_refs: list[str] = field(default_factory=list)
+    supporting_excerpts: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class PolicyInput:
     """Validated structured inputs to the decision policy."""
 
@@ -93,6 +107,7 @@ class PolicyInput:
     missing_evidence: list[str] = field(default_factory=list)
     investigation: InvestigationSignal = field(default_factory=InvestigationSignal)
     verification: VerificationSignal = field(default_factory=VerificationSignal)
+    coercion: CoercionSignal = field(default_factory=CoercionSignal)
 
 
 @dataclass(frozen=True)
@@ -145,12 +160,16 @@ def _investigation_implied_action(signal: InvestigationSignal) -> PolicyAction |
 
 
 def _apply_verification(
-    action: PolicyAction, outcome: VerificationOutcome | None, reason_codes: list[str]
+    action: PolicyAction,
+    outcome: VerificationOutcome | None,
+    reason_codes: list[str],
+    coercion: CoercionSignal | None = None,
 ) -> PolicyAction:
     """Fold the verification outcome into the deterministic action.
 
     - SUCCEEDED satisfies the REQUIRE_VERIFICATION gate (-> ALLOW) but never
-      downgrades a HOLD or BLOCK driven by strong fraud evidence.
+      downgrades a HOLD or BLOCK driven by strong fraud or coercion evidence.
+    - Strong explicit coercion evidence cannot be cleared by customer verification alone.
     - FAILED / EXPIRED / EXHAUSTED can never authorize settlement: a transaction
       that would otherwise ALLOW or merely REQUIRE_VERIFICATION is escalated to
       HOLD_FOR_INVESTIGATION.
@@ -159,6 +178,18 @@ def _apply_verification(
         return action
 
     if outcome == VerificationOutcome.SUCCEEDED:
+        if (
+            coercion is not None
+            and coercion.has_explicit_coercion
+            and coercion.coercion_severity in ("CRITICAL", "HIGH")
+        ):
+            reason_codes.append("VERIFICATION_INSUFFICIENT_RESIDUAL_RISK")
+            return (
+                action
+                if _severity(action) >= _severity(PolicyAction.HOLD_FOR_INVESTIGATION)
+                else PolicyAction.HOLD_FOR_INVESTIGATION
+            )
+
         if action == PolicyAction.REQUIRE_VERIFICATION:
             reason_codes.append("VERIFICATION_SATISFIED")
             return PolicyAction.ALLOW
@@ -235,10 +266,37 @@ def decide(inp: PolicyInput) -> PolicyDecision:
             action = PolicyAction.REQUIRE_VERIFICATION
             reason_codes.append("MISSING_EVIDENCE_REQUIRE_VERIFICATION")
 
+    # P2-A6: Voice Duress and Coercion Intelligence
+    coercion = inp.coercion
+    if coercion.provider_failed:
+        reason_codes.append("COERCION_ANALYSIS_UNAVAILABLE_FALLBACK")
+    elif coercion.available:
+        if coercion.has_legitimate_explanation:
+            reason_codes.append("LEGITIMATE_EXPLANATION_NOTED")
+
+        if coercion.voice_stress_only:
+            reason_codes.append("VOICE_STRESS_ALONE_NON_DISQUALIFYING")
+
+        if coercion.has_explicit_coercion and coercion.coercion_severity in ("CRITICAL", "HIGH"):
+            if _severity(action) < _severity(PolicyAction.HOLD_FOR_INVESTIGATION):
+                action = PolicyAction.HOLD_FOR_INVESTIGATION
+                reason_codes.append("EXPLICIT_COERCION_HOLD")
+            else:
+                reason_codes.append("EXPLICIT_COERCION_MAINTAINED_HOLD")
+        elif coercion.has_explicit_coercion and coercion.coercion_severity == "MEDIUM":
+            if _severity(action) < _severity(PolicyAction.REQUIRE_VERIFICATION):
+                action = PolicyAction.REQUIRE_VERIFICATION
+                reason_codes.append("SUSPECTED_COERCION_REQUIRE_VERIFICATION")
+
     # Verification is an additional signal applied last; it resolves the
     # verification gate but never overrides strong fraud evidence (HOLD/BLOCK)
     # and never authorizes settlement on its own.
-    action = _apply_verification(action, inp.verification.outcome, reason_codes)
+    action = _apply_verification(action, inp.verification.outcome, reason_codes, coercion)
+
+    finding_refs = list(inv.finding_refs) + [
+        ref for ref in coercion.finding_refs if ref not in inv.finding_refs
+    ]
+    evidence_refs = sorted(set(list(inv.evidence_refs) + list(coercion.supporting_excerpts)))
 
     return PolicyDecision(
         policy_version=POLICY_VERSION,
@@ -246,8 +304,8 @@ def decide(inp: PolicyInput) -> PolicyDecision:
         risk_score=inp.risk_score,
         risk_level=inp.risk_level,
         triggered_rule_ids=list(inp.triggered_rule_ids),
-        investigation_finding_refs=list(inv.finding_refs),
-        supporting_evidence_refs=list(inv.evidence_refs),
+        investigation_finding_refs=finding_refs,
+        supporting_evidence_refs=evidence_refs,
         reason_codes=reason_codes,
         missing_information=list(inv.missing_information),
         requires_verification=action == PolicyAction.REQUIRE_VERIFICATION,

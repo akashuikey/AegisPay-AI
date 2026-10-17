@@ -60,4 +60,3 @@ def downgrade() -> None:
         table_name="verification_challenges",
         postgresql_where=sa.text("status = 'PENDING'"),
     )
-

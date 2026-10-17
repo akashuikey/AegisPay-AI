@@ -638,7 +638,63 @@
   - Zero changes to existing fraud guardrails or decision policy semantics.
   - No real payment or SMS rails. Blockers: None.
 
-#### Task P2-A3b: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
+#### Task P2-A6: Voice Duress Detection & Coercion Intelligence
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer
+- **Status**: `DONE`
+- **Objective**: Extend AegisPay AI with evidence-backed detection of psychological coercion, social-engineering pressure, and simulated voice-derived signals from simulated phone call transcripts. Fully integrate findings into the deterministic decision policy, verification lifecycle, and automated resolution workflow.
+- **Deliverables**:
+  1. `backend/app/domain/coercion.py`: Domain value types (`CoercionCategory`, `CoercionSeverity`, `CoercionLevel`, `VoiceStressLevel`), dataclasses (`VoiceStressEvidence`, `CoercionFinding`, `CoercionAnalysisResult`), and programmatic verbatim grounding validator `validate_transcript_excerpt()`.
+  2. `backend/app/domain/coercion_prompts.py`: Prompt injection-hardened system prompt (`COERCION_ANALYSIS_SYSTEM_INSTRUCTION`) and `build_coercion_prompt()` with untrusted transcript isolation (`<untrusted_simulated_call_transcript>`).
+  3. `backend/app/schemas/coercion.py`: Pydantic models for request/response schemas, structured Gemini model output, and simulated voice stress telemetry.
+  4. `backend/app/db/models.py`: `TransactionCoercionAnalysisModel` mapped entity linked to `TransactionModel`.
+  5. Alembic async migration `0010_create_coercion_analyses.py`: applied and verified across clean DB, downgrade/re-upgrade, and test database.
+  6. `backend/app/repositories/transaction_repository.py`: persistence and lookup methods (`create_coercion_analysis`, `get_latest_coercion_analysis`, `get_coercion_analysis_by_id`).
+  7. `backend/app/services/ai_client.py`: added `generate_coercion_analysis` to `AIInvestigationClient` protocol, `VertexGeminiClient`, and `MockGeminiClient` (with comprehensive pattern synthesis for authority threats, digital arrest, secrecy, safeguard bypass, urgency, and legitimate explanations).
+  8. `backend/app/services/coercion_service.py`: application service managing prompt assembly, AI execution with safe fallback on provider error/timeout (`status="UNAVAILABLE"`), verbatim excerpt validation (discarding hallucinated citations), and transcript deduplication caching.
+  9. `backend/app/domain/decision_policy.py`: extended `PolicyInput` with `CoercionSignal`. Policy escalates explicit critical/high coercion to `HOLD_FOR_INVESTIGATION` (`EXPLICIT_COERCION_HOLD`), preserves voice stress advisory boundary (`VOICE_STRESS_ALONE_NON_DISQUALIFYING`), and prevents successful customer OTP verification from clearing strong coercion (`VERIFICATION_INSUFFICIENT_RESIDUAL_RISK`).
+  10. `backend/app/services/decision_workflow_service.py`: integrated coercion intelligence into `evaluate` and `resolve_after_verification` automated resolution flows.
+  11. REST API in `backend/app/api/coercion.py` & `backend/app/api/router.py`:
+      - `POST /api/v1/transactions/{id}/coercion/analyze`: operator-authenticated route to analyze call transcript.
+      - `GET /api/v1/transactions/{id}/coercion`: operator-authenticated route to retrieve latest analysis.
+  12. Frontend API client `frontend/src/api/coercionApi.ts`: typed fetchers (`analyzeCoercionApi`, `getLatestCoercionApi`).
+  13. Frontend UI component `frontend/src/components/CoercionAnalysisPanel.tsx`: integrated into the drawer under the AI Investigation tab. Displays coercion badge, qualitative model certainty notice, voice stress telemetry card with advisory disclaimer, grounded verbatim citations, legitimate explanations, and real-time transcript input with preset templates.
+  14. Comprehensive test suites:
+      - Domain unit tests in `backend/tests/unit/test_coercion_domain.py` (8 tests).
+      - Policy unit tests in `backend/tests/unit/test_decision_policy.py` (21 tests).
+      - Coercion API integration tests in `backend/tests/integration/test_coercion_api.py` (14 tests covering all prompt scenarios).
+      - Frontend component tests in `frontend/src/__tests__/CoercionAnalysisPanel.test.tsx` (4 tests).
+  15. Architectural decision record: `docs/decisions/ADR-005-voice-duress-and-coercion-intelligence.md`.
+- **Acceptance Criteria**:
+  - [x] Explicit fake-authority threat detected with verbatim transcript citation.
+  - [x] Secrecy demands and instructions to bypass bank safeguards detected.
+  - [x] Urgency without sufficient coercion evidence does not cause confirmed coercion verdict.
+  - [x] Legitimate high-value transfer with plausible explanation recognized and surfaced as mitigating evidence.
+  - [x] Ordinary stress without explicit coercion preserves advisory status and does not block/hold.
+  - [x] Malformed model output and fabricated citations rejected (grounding invariant).
+  - [x] Prompt injection attempts in transcript safely treated as untrusted data under bypass safeguards.
+  - [x] Provider timeout/failure applies safe deterministic fallback (`status="UNAVAILABLE"`).
+  - [x] Strong coercion evidence remains effective after successful customer verification.
+  - [x] Weak voice stress alone never causes a block or fraud verdict.
+  - [x] Authorization and transaction scoping enforced (401 unauthenticated, 404 nonexistent tx).
+  - [x] Bounded transcript input validation enforced (10 to 10,000 characters).
+  - [x] Analysis persistence and auditability verified in database and API.
+  - [x] Matching transcript deduplication prevents redundant AI calls.
+  - [x] All 227 backend tests and 43 frontend tests pass (270 total tests, 100% green).
+  - [x] Full quality gates (`make check-all`: ruff check, ruff format, mypy, pytest, eslint, tsc, vitest, vite build) pass with 0 errors.
+- **Verification Commands & Results**:
+  ```bash
+  POSTGRES_PORT=5433 make check-all
+  # Backend:
+  # - uv run ruff check .: All checks passed!
+  # - uv run ruff format --check .: 80 files already formatted
+  # - uv run mypy app: Success: no issues found in 58 source files
+  # - uv run pytest: 227 passed in 22.57s
+  # Frontend:
+  # - eslint .: 0 errors, 0 warnings
+  # - tsc --noEmit: 0 errors
+  # - vitest run: 43 passed in 7 test files
+  # - vite build: built in 588ms
+  ```
 
 ---
 

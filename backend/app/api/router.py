@@ -5,7 +5,15 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.api import auth, conversations, investigations, risk, transactions, verification
+from app.api import (
+    auth,
+    coercion,
+    conversations,
+    investigations,
+    risk,
+    transactions,
+    verification,
+)
 from app.api.auth import get_current_operator
 from app.core.config import Settings, get_settings
 
@@ -26,6 +34,7 @@ router.include_router(transactions.router, dependencies=_operator_only)
 router.include_router(risk.router, dependencies=_operator_only)
 router.include_router(investigations.router, dependencies=_operator_only)
 router.include_router(conversations.router, dependencies=_operator_only)
+router.include_router(coercion.router, dependencies=_operator_only)
 
 
 class ApiInfoResponse(BaseModel):

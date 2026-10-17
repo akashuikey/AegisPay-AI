@@ -1,10 +1,11 @@
-"""Unit tests for the deterministic decision policy engine (P2-A4)."""
-
 from app.domain.decision_policy import (
     POLICY_VERSION,
+    CoercionSignal,
     InvestigationSignal,
     PolicyAction,
     PolicyInput,
+    VerificationOutcome,
+    VerificationSignal,
     decide,
 )
 from app.domain.investigation import RiskSentiment
@@ -19,6 +20,7 @@ def _input(
     rules: list[str] | None = None,
     missing: list[str] | None = None,
     investigation: InvestigationSignal | None = None,
+    coercion: CoercionSignal | None = None,
 ) -> PolicyInput:
     return PolicyInput(
         risk_score=score,
@@ -27,6 +29,7 @@ def _input(
         triggered_rule_ids=rules or [],
         missing_evidence=missing or [],
         investigation=investigation or InvestigationSignal(),
+        coercion=coercion or CoercionSignal(),
     )
 
 
@@ -176,8 +179,6 @@ def test_unknown_sentiment_with_missing_info_requires_verification() -> None:
 
 # --- Verification signal (P2-A5) -------------------------------------------
 
-from app.domain.decision_policy import VerificationOutcome, VerificationSignal  # noqa: E402
-
 
 def _input_v(
     *,
@@ -265,3 +266,97 @@ def test_verification_exhausted_on_low_risk_still_holds() -> None:
         )
     )
     assert result.action == PolicyAction.HOLD_FOR_INVESTIGATION
+
+
+def test_explicit_coercion_escalates_to_hold() -> None:
+    # Baseline is ALLOW or REQUIRE_VERIFICATION, but explicit critical coercion is detected
+    result = decide(
+        _input(
+            score=30,
+            level=RiskLevel.MEDIUM,
+            action=RecommendedAction.REQUIRE_VERIFICATION,
+            coercion=CoercionSignal(
+                available=True,
+                has_explicit_coercion=True,
+                coercion_severity="CRITICAL",
+                finding_refs=["COERCION-1"],
+                supporting_excerpts=["You are placed under digital arrest right now."],
+            ),
+        )
+    )
+    assert result.action == PolicyAction.HOLD_FOR_INVESTIGATION
+    assert "EXPLICIT_COERCION_HOLD" in result.reason_codes
+    assert "COERCION-1" in result.investigation_finding_refs
+    assert "You are placed under digital arrest right now." in result.supporting_evidence_refs
+
+
+def test_explicit_coercion_persists_hold_after_verification_success() -> None:
+    # Even if customer successfully enters OTP, strong explicit coercion prevents settlement!
+    inp = PolicyInput(
+        risk_score=35,
+        risk_level=RiskLevel.MEDIUM,
+        recommended_action=RecommendedAction.REQUIRE_VERIFICATION,
+        verification=VerificationSignal(outcome=VerificationOutcome.SUCCEEDED),
+        coercion=CoercionSignal(
+            available=True,
+            has_explicit_coercion=True,
+            coercion_severity="HIGH",
+            finding_refs=["COERCION-1"],
+            supporting_excerpts=["Transfer immediately or police will arrive in 15 minutes."],
+        ),
+    )
+    result = decide(inp)
+    assert result.action == PolicyAction.HOLD_FOR_INVESTIGATION
+    assert result.action != PolicyAction.ALLOW
+    assert "VERIFICATION_INSUFFICIENT_RESIDUAL_RISK" in result.reason_codes
+
+
+def test_voice_stress_alone_does_not_hold_or_block() -> None:
+    # Acoustic telemetry alone is advisory; does not escalate baseline ALLOW to HOLD/BLOCK
+    result = decide(
+        _input(
+            score=10,
+            level=RiskLevel.LOW,
+            action=RecommendedAction.ALLOW,
+            coercion=CoercionSignal(
+                available=True,
+                has_explicit_coercion=False,
+                voice_stress_only=True,
+            ),
+        )
+    )
+    assert result.action == PolicyAction.ALLOW
+    assert "VOICE_STRESS_ALONE_NON_DISQUALIFYING" in result.reason_codes
+
+
+def test_legitimate_explanation_noted_in_reason_codes() -> None:
+    result = decide(
+        _input(
+            score=15,
+            level=RiskLevel.LOW,
+            action=RecommendedAction.ALLOW,
+            coercion=CoercionSignal(
+                available=True,
+                has_explicit_coercion=False,
+                has_legitimate_explanation=True,
+            ),
+        )
+    )
+    assert result.action == PolicyAction.ALLOW
+    assert "LEGITIMATE_EXPLANATION_NOTED" in result.reason_codes
+
+
+def test_coercion_provider_failed_preserves_deterministic_baseline() -> None:
+    result = decide(
+        _input(
+            score=65,
+            level=RiskLevel.HIGH,
+            action=RecommendedAction.HOLD_FOR_INVESTIGATION,
+            coercion=CoercionSignal(
+                available=False,
+                provider_failed=True,
+            ),
+        )
+    )
+    assert result.action == PolicyAction.HOLD_FOR_INVESTIGATION
+    assert "COERCION_ANALYSIS_UNAVAILABLE_FALLBACK" in result.reason_codes

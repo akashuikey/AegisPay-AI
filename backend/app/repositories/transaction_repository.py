@@ -15,6 +15,7 @@ from app.db.models import (
     InvestigationConversationTurnModel,
     TransactionAssessmentModel,
     TransactionAuditModel,
+    TransactionCoercionAnalysisModel,
     TransactionDecisionModel,
     TransactionInvestigationModel,
     TransactionModel,
@@ -422,3 +423,35 @@ class TransactionRepository:
         conv = await self.get_conversation_by_id(conversation_id)
         assert conv is not None
         return conv
+
+    async def create_coercion_analysis(
+        self, analysis: TransactionCoercionAnalysisModel
+    ) -> TransactionCoercionAnalysisModel:
+        """Persist a new transaction coercion analysis record."""
+        self.session.add(analysis)
+        await self.session.commit()
+        await self.session.refresh(analysis)
+        return analysis
+
+    async def get_latest_coercion_analysis(
+        self, transaction_id: UUID
+    ) -> TransactionCoercionAnalysisModel | None:
+        """Fetch the most recent coercion analysis for a transaction."""
+        stmt = (
+            select(TransactionCoercionAnalysisModel)
+            .where(TransactionCoercionAnalysisModel.transaction_id == transaction_id)
+            .order_by(TransactionCoercionAnalysisModel.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_coercion_analysis_by_id(
+        self, analysis_id: UUID
+    ) -> TransactionCoercionAnalysisModel | None:
+        """Fetch a coercion analysis by its primary key."""
+        stmt = select(TransactionCoercionAnalysisModel).where(
+            TransactionCoercionAnalysisModel.id == analysis_id
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()

@@ -14,11 +14,13 @@ from app.core.errors import AIConfigurationError, AIProviderError, ConcurrencyCo
 from app.core.logging import get_logger
 from app.db.models import (
     TransactionAssessmentModel,
+    TransactionCoercionAnalysisModel,
     TransactionDecisionModel,
     TransactionInvestigationModel,
     TransactionModel,
 )
 from app.domain.decision_policy import (
+    CoercionSignal,
     InvestigationSignal,
     PolicyAction,
     PolicyDecision,
@@ -131,7 +133,13 @@ class DecisionWorkflowService:
             )
 
         # 3. Deterministic policy decision (LLM never selects the action).
-        policy_input = self._build_policy_input(assessment, investigation, provider_failed)
+        coercion_analysis = await self.repository.get_latest_coercion_analysis(transaction_id)
+        policy_input = self._build_policy_input(
+            assessment,
+            investigation,
+            provider_failed,
+            coercion_analysis=coercion_analysis,
+        )
         decision = decide(policy_input)
 
         # 4. Execute the corresponding permitted transition and persist the decision.
@@ -251,14 +259,64 @@ class DecisionWorkflowService:
                 ),
             )
 
+        coercion_analysis = await self.repository.get_latest_coercion_analysis(transaction_id)
         policy_input = self._build_policy_input(
             assessment,
             investigation,
             provider_failed=False,
             verification_outcome=verification_outcome,
+            coercion_analysis=coercion_analysis,
         )
         decision = decide(policy_input)
         return await self._apply_decision(tx, assessment, investigation, decision, False)
+
+    def _build_coercion_signal(
+        self,
+        coercion: TransactionCoercionAnalysisModel | None,
+    ) -> CoercionSignal:
+        if coercion is None:
+            return CoercionSignal(available=False)
+
+        if coercion.status == "UNAVAILABLE":
+            return CoercionSignal(available=False, provider_failed=True)
+
+        findings = coercion.findings or []
+        explicit_findings = [
+            f
+            for f in findings
+            if f.get("is_explicit") and f.get("category") != "LEGITIMATE_EXPLANATION"
+        ]
+        has_explicit = len(explicit_findings) > 0
+
+        severities = [str(f.get("severity", "LOW")) for f in explicit_findings]
+        highest_severity: str | None = None
+        for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+            if s in severities:
+                highest_severity = s
+                break
+
+        has_legit = bool(coercion.legitimate_explanations)
+        voice_signals = coercion.voice_stress_signals or {}
+        voice_detected = bool(
+            voice_signals.get("detected") or voice_signals.get("level") in ("ELEVATED", "HIGH")
+        )
+        voice_stress_only = voice_detected and not has_explicit
+
+        finding_refs = [str(f.get("id")) for f in findings if f.get("id")]
+        supporting_excerpts = [
+            str(f.get("supporting_excerpt")) for f in findings if f.get("supporting_excerpt")
+        ]
+
+        return CoercionSignal(
+            available=True,
+            provider_failed=False,
+            has_explicit_coercion=has_explicit,
+            coercion_severity=highest_severity,
+            has_legitimate_explanation=has_legit,
+            voice_stress_only=voice_stress_only,
+            finding_refs=finding_refs,
+            supporting_excerpts=supporting_excerpts,
+        )
 
     def _build_policy_input(
         self,
@@ -266,6 +324,7 @@ class DecisionWorkflowService:
         investigation: TransactionInvestigationModel | None,
         provider_failed: bool,
         verification_outcome: VerificationOutcome | None = None,
+        coercion_analysis: TransactionCoercionAnalysisModel | None = None,
     ) -> PolicyInput:
         triggered_rule_ids = [
             str(r.get("rule_id")) for r in assessment.triggered_rules if r.get("rule_id")
@@ -291,6 +350,8 @@ class DecisionWorkflowService:
         else:
             signal = InvestigationSignal(available=False, provider_failed=provider_failed)
 
+        coercion_signal = self._build_coercion_signal(coercion_analysis)
+
         return PolicyInput(
             risk_score=assessment.risk_score,
             risk_level=RiskLevel(assessment.risk_level),
@@ -299,6 +360,7 @@ class DecisionWorkflowService:
             missing_evidence=list(assessment.missing_evidence),
             investigation=signal,
             verification=VerificationSignal(outcome=verification_outcome),
+            coercion=coercion_signal,
         )
 
     async def _apply_decision(

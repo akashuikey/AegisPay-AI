@@ -194,6 +194,14 @@ class TransactionModel(Base):
         order_by="VerificationChallengeModel.created_at.desc()",
     )
 
+    # Relationship to coercion analysis records (P2-A6)
+    coercion_analyses: Mapped[list["TransactionCoercionAnalysisModel"]] = relationship(
+        "TransactionCoercionAnalysisModel",
+        back_populates="transaction",
+        cascade="all, delete-orphan",
+        order_by="TransactionCoercionAnalysisModel.created_at.desc()",
+    )
+
 
 class TransactionAuditModel(Base):
     """Append-only audit trail recording state transitions and lifecycle events."""
@@ -681,4 +689,91 @@ class InvestigationConversationTurnModel(Base):
     conversation: Mapped["InvestigationConversationModel"] = relationship(
         "InvestigationConversationModel",
         back_populates="turns",
+    )
+
+
+class TransactionCoercionAnalysisModel(Base):
+    """Forensic voice duress and coercion intelligence record (P2-A6)."""
+
+    __tablename__ = "transaction_coercion_analyses"
+    __table_args__ = (
+        Index("ix_transaction_coercion_analyses_tx_created", "transaction_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    transcript_snippet: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    overall_coercion_level: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    confidence: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+    )
+    confidence_score: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+    )
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    voice_stress_signals: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    legitimate_explanations: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    uncertainty_notes: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    missing_information: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    summary: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    model_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="COMPLETED",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+
+    # Relationship to parent transaction
+    transaction: Mapped["TransactionModel"] = relationship(
+        "TransactionModel",
+        back_populates="coercion_analyses",
     )

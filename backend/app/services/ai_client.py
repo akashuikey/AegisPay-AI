@@ -12,12 +12,21 @@ from google.genai import errors, types
 from app.core.config import Settings
 from app.core.errors import AIConfigurationError, AIProviderError
 from app.core.logging import get_logger
+from app.domain.coercion import (
+    CoercionCategory,
+    CoercionLevel,
+    CoercionSeverity,
+)
 from app.domain.investigation import (
     ConfidenceLevel,
     EvidenceProvenance,
     FindingCategory,
     InvestigationModelMetadata,
     RiskSentiment,
+)
+from app.schemas.coercion import (
+    CoercionFindingSchema,
+    CoercionStructuredOutput,
 )
 from app.schemas.investigation import (
     ConversationTurnStructuredOutput,
@@ -47,6 +56,15 @@ class AIInvestigationClient(Protocol):
         correlation_id: str | None = None,
     ) -> tuple[ConversationTurnStructuredOutput, InvestigationModelMetadata]:
         """Generate structured forensic response and findings for a multi-turn conversation."""
+        ...
+
+    async def generate_coercion_analysis(
+        self,
+        prompt: str,
+        system_instruction: str,
+        correlation_id: str | None = None,
+    ) -> tuple[CoercionStructuredOutput, InvestigationModelMetadata]:
+        """Generate structured forensic coercion findings from call transcript."""
         ...
 
 
@@ -351,6 +369,120 @@ class VertexGeminiClient:
             status_code=503,
         )
 
+    async def generate_coercion_analysis(
+        self,
+        prompt: str,
+        system_instruction: str,
+        correlation_id: str | None = None,
+    ) -> tuple[CoercionStructuredOutput, InvestigationModelMetadata]:
+        """Execute Gemini model generation for call transcript coercion analysis."""
+        client = self._get_client()
+        start_time = time.monotonic()
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema=CoercionStructuredOutput,
+            temperature=0.1,
+        )
+
+        attempts = 0
+        last_error: Exception | None = None
+
+        while attempts <= self.max_retries:
+            attempts += 1
+            try:
+                logger.info(
+                    "Calling Gemini coercion model=%s (attempt %d/%d, correlation_id=%s)",
+                    self.model_id,
+                    attempts,
+                    self.max_retries + 1,
+                    correlation_id,
+                )
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=self.model_id,
+                        contents=prompt,
+                        config=config,
+                    ),
+                    timeout=self.timeout,
+                )
+
+                latency_ms = int((time.monotonic() - start_time) * 1000)
+                raw_text = response.text
+                if not raw_text:
+                    raise AIProviderError(
+                        message="Gemini model returned empty response for coercion analysis",
+                        code="AI_EMPTY_RESPONSE",
+                        status_code=502,
+                    )
+
+                try:
+                    parsed_json = json.loads(raw_text)
+                    structured_output = CoercionStructuredOutput.model_validate(parsed_json)
+                except Exception as parse_err:
+                    logger.error(
+                        "Failed to parse Gemini coercion output into structured schema: %s",
+                        parse_err,
+                    )
+                    raise AIProviderError(
+                        message=("Model output did not match expected structured coercion schema"),
+                        code="AI_PARSE_ERROR",
+                        status_code=502,
+                        details={"raw_output_snippet": raw_text[:500]},
+                    ) from parse_err
+
+                metadata = InvestigationModelMetadata(
+                    provider="vertex_ai" if self.settings.GCP_PROJECT_ID else "gemini_api",
+                    model_id=self.model_id,
+                    latency_ms=latency_ms,
+                    correlation_id=correlation_id,
+                )
+                return structured_output, metadata
+
+            except TimeoutError:
+                logger.warning("Gemini coercion analysis timed out after %.1fs", self.timeout)
+                last_error = AIProviderError(
+                    message=f"AI coercion analysis timed out after {self.timeout}s",
+                    code="AI_PROVIDER_TIMEOUT",
+                    status_code=504,
+                )
+            except errors.APIError as api_err:
+                err_code = getattr(api_err, "code", None)
+                err_msg = str(api_err)
+                logger.warning("Gemini API error (code=%s): %s", err_code, err_msg)
+                if err_code == 429:
+                    raise AIProviderError(
+                        message="AI coercion analysis rate limit or quota exceeded",
+                        code="AI_RATE_LIMIT_EXCEEDED",
+                        status_code=429,
+                    ) from api_err
+                last_error = AIProviderError(
+                    message=f"AI provider returned error: {err_msg}",
+                    code="AI_PROVIDER_ERROR",
+                    status_code=502,
+                )
+                break
+            except Exception as general_err:
+                if isinstance(general_err, (AIProviderError, AIConfigurationError)):
+                    raise
+                logger.error("Unexpected error during Gemini coercion execution: %s", general_err)
+                last_error = AIProviderError(
+                    message="Unexpected error communicating with AI investigation provider",
+                    code="AI_PROVIDER_ERROR",
+                    status_code=502,
+                )
+                break
+
+        if last_error:
+            raise last_error
+
+        raise AIProviderError(
+            message="AI coercion analysis failed after retries",
+            code="AI_PROVIDER_UNAVAILABLE",
+            status_code=503,
+        )
+
 
 class MockGeminiClient:
     """Configurable mock AI client for unit/integration tests and offline development."""
@@ -359,15 +491,46 @@ class MockGeminiClient:
         self,
         default_output: InvestigationStructuredOutput | None = None,
         default_conversation_output: ConversationTurnStructuredOutput | None = None,
+        default_coercion_output: CoercionStructuredOutput | None = None,
         should_fail: bool = False,
         failure_exception: Exception | None = None,
         latency_ms: int = 45,
     ) -> None:
         self.default_output = default_output
         self.default_conversation_output = default_conversation_output
+        self.default_coercion_output = default_coercion_output
         self.should_fail = should_fail
         self.failure_exception = failure_exception
         self.latency_ms = latency_ms
+
+    async def generate_coercion_analysis(
+        self,
+        prompt: str,
+        system_instruction: str,
+        correlation_id: str | None = None,
+    ) -> tuple[CoercionStructuredOutput, InvestigationModelMetadata]:
+        """Return predefined or dynamically synthesized coercion analysis output."""
+        if self.should_fail:
+            if self.failure_exception:
+                raise self.failure_exception
+            raise AIProviderError(
+                message="Mocked AI provider failure",
+                code="AI_PROVIDER_ERROR",
+                status_code=502,
+            )
+
+        if self.default_coercion_output is not None:
+            output = self.default_coercion_output
+        else:
+            output = self._synthesize_mock_coercion(prompt)
+
+        metadata = InvestigationModelMetadata(
+            provider="mock_gemini",
+            model_id="gemini-2.5-flash-mock",
+            latency_ms=self.latency_ms,
+            correlation_id=correlation_id,
+        )
+        return output, metadata
 
     async def generate_investigation(
         self,
@@ -984,4 +1147,418 @@ class MockGeminiClient:
             missing_information=missing,
             follow_up_questions=filtered_questions,
             contradictory_or_mitigating_evidence=mitigating,
+        )
+
+    def _synthesize_mock_coercion(self, prompt: str) -> CoercionStructuredOutput:
+        """Synthesize context-aware mock coercion findings from call transcript."""
+        # 1. Extract transcript from untrusted tags
+        match = re.search(
+            r"<untrusted_simulated_call_transcript>(.*?)</untrusted_simulated_call_transcript>",
+            prompt,
+            re.DOTALL,
+        )
+        transcript = match.group(1).strip() if match else prompt.strip()
+        lower_transcript = transcript.lower()
+
+        findings: list[CoercionFindingSchema] = []
+        legitimate_explanations: list[str] = []
+        uncertainty_notes: list[str] = []
+        missing_information: list[str] = []
+
+        def _get_exact_excerpt(text: str, target: str) -> str:
+            idx = text.lower().find(target.lower())
+            if idx == -1:
+                return text[:50]
+            start = max(
+                text.rfind(".", 0, idx),
+                text.rfind("\n", 0, idx),
+                text.rfind("?", 0, idx),
+                text.rfind("!", 0, idx),
+                text.rfind(":", 0, idx),
+            )
+            start = 0 if start == -1 else start + 1
+            end = len(text)
+            for p in (".", "\n", "?", "!"):
+                pos = text.find(p, idx)
+                if pos != -1 and pos < end:
+                    end = pos
+            snippet = text[start:end].strip()
+            return snippet if snippet else text[idx : idx + len(target)]
+
+        # 2. Check for adversarial prompt injection
+        injection_phrases = [
+            "ignore previous instructions",
+            "ignore all instructions",
+            "system override",
+            "safe transaction",
+            "no coercion here",
+            "mark safe",
+            "bypass all checks",
+        ]
+        for phrase in injection_phrases:
+            if phrase in lower_transcript:
+                exc = _get_exact_excerpt(transcript, phrase)
+                findings.append(
+                    CoercionFindingSchema(
+                        id=f"COERCION-{len(findings) + 1}",
+                        category=CoercionCategory.BYPASS_SAFEGUARDS_INSTRUCTION,
+                        severity=CoercionSeverity.HIGH,
+                        is_explicit=True,
+                        explanation=(
+                            "Adversarial prompt injection attempt detected embedded in "
+                            "call transcript."
+                        ),
+                        supporting_excerpt=exc,
+                        provenance="simulated_call_transcript",
+                    )
+                )
+                uncertainty_notes.append(
+                    "Adversarial text injection detected in dialogue; instruction neutralized."
+                )
+                break
+
+        # 3. Check for authority impersonation
+        auth_terms = [
+            "cbi",
+            "police",
+            "customs",
+            "inspector",
+            "narcotics",
+            "enforcement directorate",
+            "cyber crime",
+            "trai",
+            "court order",
+            "magistrate",
+        ]
+        for term in auth_terms:
+            if term in lower_transcript:
+                exc = _get_exact_excerpt(transcript, term)
+                findings.append(
+                    CoercionFindingSchema(
+                        id=f"COERCION-{len(findings) + 1}",
+                        category=CoercionCategory.AUTHORITY_IMPERSONATION,
+                        severity=CoercionSeverity.CRITICAL,
+                        is_explicit=True,
+                        explanation=(
+                            "Caller claims authority as law enforcement or regulatory official "
+                            "demanding compliance."
+                        ),
+                        supporting_excerpt=exc,
+                        provenance="simulated_call_transcript",
+                    )
+                )
+                break
+
+        # 4. Check for legal or consequence threat ("digital arrest")
+        threat_terms = [
+            "digital arrest",
+            "arrest",
+            "warrant",
+            "jail",
+            "fir",
+            "non-bailable",
+            "confiscate",
+            "seize your account",
+            "freeze your account",
+            "face criminal charges",
+        ]
+        for term in threat_terms:
+            if term in lower_transcript:
+                exc = _get_exact_excerpt(transcript, term)
+                findings.append(
+                    CoercionFindingSchema(
+                        id=f"COERCION-{len(findings) + 1}",
+                        category=CoercionCategory.LEGAL_OR_CONSEQUENCE_THREAT,
+                        severity=CoercionSeverity.CRITICAL,
+                        is_explicit=True,
+                        explanation=(
+                            "Caller threatens arrest, prosecution, or asset confiscation if "
+                            "funds are not moved."
+                        ),
+                        supporting_excerpt=exc,
+                        provenance="simulated_call_transcript",
+                    )
+                )
+                break
+
+        # 5. Check for secrecy demand
+        secrecy_terms = [
+            "don't tell anyone",
+            "do not tell",
+            "stay on the line",
+            "keep this secret",
+            "closed room",
+            "do not disconnect",
+            "confidential investigation",
+            "national security",
+            "do not speak to your family",
+            "cannot tell anyone",
+        ]
+        for term in secrecy_terms:
+            if term in lower_transcript:
+                exc = _get_exact_excerpt(transcript, term)
+                findings.append(
+                    CoercionFindingSchema(
+                        id=f"COERCION-{len(findings) + 1}",
+                        category=CoercionCategory.SECRECY_DEMAND,
+                        severity=CoercionSeverity.HIGH,
+                        is_explicit=True,
+                        explanation=(
+                            "Caller demands victim maintain absolute secrecy and stay isolated."
+                        ),
+                        supporting_excerpt=exc,
+                        provenance="simulated_call_transcript",
+                    )
+                )
+                break
+
+        # 6. Check for bypass safeguards instructions
+        bypass_terms = [
+            "tell the bank",
+            "if the bank asks",
+            "say it's for a relative",
+            "personal transfer",
+            "ignore bank warnings",
+            "don't say anything to the teller",
+            "bypass",
+            "say medical emergency",
+            "say it is for family",
+        ]
+        for term in bypass_terms:
+            if term in lower_transcript:
+                exc = _get_exact_excerpt(transcript, term)
+                findings.append(
+                    CoercionFindingSchema(
+                        id=f"COERCION-{len(findings) + 1}",
+                        category=CoercionCategory.BYPASS_SAFEGUARDS_INSTRUCTION,
+                        severity=CoercionSeverity.HIGH,
+                        is_explicit=True,
+                        explanation=(
+                            "Caller instructs victim to mislead bank staff or bypass safety "
+                            "verification questions."
+                        ),
+                        supporting_excerpt=exc,
+                        provenance="simulated_call_transcript",
+                    )
+                )
+                break
+
+        # 7. Check for remote access pressure
+        remote_terms = [
+            "anydesk",
+            "teamviewer",
+            "rustdesk",
+            "screen share",
+            "remote access",
+            "install this app",
+            "download apk",
+            "quicksupport",
+        ]
+        for term in remote_terms:
+            if term in lower_transcript:
+                exc = _get_exact_excerpt(transcript, term)
+                findings.append(
+                    CoercionFindingSchema(
+                        id=f"COERCION-{len(findings) + 1}",
+                        category=CoercionCategory.REMOTE_ACCESS_PRESSURE,
+                        severity=CoercionSeverity.HIGH,
+                        is_explicit=True,
+                        explanation=(
+                            "Pressure to install screen sharing or remote management tools."
+                        ),
+                        supporting_excerpt=exc,
+                        provenance="simulated_call_transcript",
+                    )
+                )
+                break
+
+        # 8. Check for investment guarantee
+        invest_terms = [
+            "guaranteed return",
+            "100% profit",
+            "risk-free",
+            "double your money",
+            "trading returns",
+            "secret platform",
+            "cryptocurrency profit",
+        ]
+        for term in invest_terms:
+            if term in lower_transcript:
+                exc = _get_exact_excerpt(transcript, term)
+                findings.append(
+                    CoercionFindingSchema(
+                        id=f"COERCION-{len(findings) + 1}",
+                        category=CoercionCategory.INVESTMENT_GUARANTEE,
+                        severity=CoercionSeverity.HIGH,
+                        is_explicit=True,
+                        explanation=(
+                            "Fraudulent claims of guaranteed investment profit and "
+                            "risk-free returns."
+                        ),
+                        supporting_excerpt=exc,
+                        provenance="simulated_call_transcript",
+                    )
+                )
+                break
+
+        # 9. Check for urgent transfer demand
+        urgent_terms = [
+            "within 15 minutes",
+            "immediately",
+            "right now",
+            "urgently",
+            "hurry",
+            "urgent deadline",
+            "transfer now",
+            "before the timer runs out",
+        ]
+        for term in urgent_terms:
+            if term in lower_transcript:
+                exc = _get_exact_excerpt(transcript, term)
+                findings.append(
+                    CoercionFindingSchema(
+                        id=f"COERCION-{len(findings) + 1}",
+                        category=CoercionCategory.URGENT_TRANSFER_DEMAND,
+                        severity=CoercionSeverity.MEDIUM,
+                        is_explicit=True,
+                        explanation=(
+                            "Caller applies intense urgency pressure to force immediate transfer."
+                        ),
+                        supporting_excerpt=exc,
+                        provenance="simulated_call_transcript",
+                    )
+                )
+                break
+
+        # 10. Check for legitimate explanation / mitigating context
+        legit_terms = [
+            "medical emergency",
+            "hospital bill",
+            "buying a car",
+            "apartment deposit",
+            "booking an apartment",
+            "apartment",
+            "landlord",
+            "college",
+            "real estate",
+            "renovation",
+            "vendor invoice",
+            "paying my brother",
+            "paying my sister",
+            "school fee",
+            "college tuition",
+            "down payment",
+            "verified vendor",
+            "purchasing equipment",
+            "contractor payment",
+        ]
+        for term in legit_terms:
+            if term in lower_transcript:
+                exc = _get_exact_excerpt(transcript, term)
+                findings.append(
+                    CoercionFindingSchema(
+                        id=f"COERCION-{len(findings) + 1}",
+                        category=CoercionCategory.LEGITIMATE_EXPLANATION,
+                        severity=CoercionSeverity.INFO,
+                        is_explicit=True,
+                        explanation=(
+                            "Dialogue provides legitimate commercial or personal context "
+                            "without coercion."
+                        ),
+                        supporting_excerpt=exc,
+                        provenance="simulated_call_transcript",
+                    )
+                )
+                legitimate_explanations.append(
+                    f"Customer stated legitimate transfer purpose: '{exc}'"
+                )
+                break
+
+        # 11. Acoustic telemetry note
+        lower_prompt = prompt.lower()
+        has_acoustic_stress = any(
+            phrase in lower_prompt
+            for phrase in [
+                "voice stress detected: true",
+                "acoustic stress level: elevated",
+                "acoustic stress level: high",
+            ]
+        )
+        if has_acoustic_stress:
+            if not any(
+                f.severity in (CoercionSeverity.CRITICAL, CoercionSeverity.HIGH) for f in findings
+            ):
+                uncertainty_notes.append(
+                    "Acoustic voice stress detected in telemetry; no verbal coercion, authority "
+                    "threats, or duress indicators present in transcript."
+                )
+            else:
+                uncertainty_notes.append(
+                    "Acoustic voice stress correlates with verbal coercion cues in dialogue."
+                )
+
+        # 12. Evaluate overall coercion level and confidence
+        has_critical = any(
+            f.severity == CoercionSeverity.CRITICAL
+            or f.category
+            in (
+                CoercionCategory.AUTHORITY_IMPERSONATION,
+                CoercionCategory.LEGAL_OR_CONSEQUENCE_THREAT,
+                CoercionCategory.SECRECY_DEMAND,
+                CoercionCategory.BYPASS_SAFEGUARDS_INSTRUCTION,
+            )
+            for f in findings
+        )
+        has_suspected = any(
+            f.category
+            in (
+                CoercionCategory.REMOTE_ACCESS_PRESSURE,
+                CoercionCategory.INVESTMENT_GUARANTEE,
+                CoercionCategory.URGENT_TRANSFER_DEMAND,
+            )
+            for f in findings
+        )
+
+        if has_critical:
+            overall_level = CoercionLevel.CONFIRMED_COERCION
+            confidence = ConfidenceLevel.HIGH
+            confidence_score = 0.95
+            summary = (
+                "Critical coercion detected: dialogue contains explicit authority impersonation, "
+                "consequence threats, or secrecy demands."
+            )
+        elif has_suspected:
+            overall_level = CoercionLevel.SUSPECTED
+            confidence = ConfidenceLevel.MEDIUM
+            confidence_score = 0.75
+            summary = (
+                "Suspected coercion or social engineering pressure: dialogue contains urgency "
+                "demands or manipulative inducement without confirmed authority impersonation."
+            )
+        elif legitimate_explanations and not findings:
+            overall_level = CoercionLevel.NONE
+            confidence = ConfidenceLevel.HIGH
+            confidence_score = 0.90
+            summary = (
+                "No coercion detected: dialogue provides legitimate context and unpressured "
+                "customer explanations."
+            )
+        else:
+            overall_level = CoercionLevel.NONE
+            confidence = ConfidenceLevel.HIGH
+            confidence_score = 0.85
+            summary = "No coercion or duress indicators detected in supplied call transcript."
+
+        if not transcript or len(transcript) < 30:
+            missing_information.append("Transcript duration and complete dialogue context")
+
+        return CoercionStructuredOutput(
+            overall_coercion_level=overall_level,
+            confidence=confidence,
+            confidence_score=confidence_score,
+            findings=findings,
+            legitimate_explanations=legitimate_explanations,
+            uncertainty_notes=uncertainty_notes,
+            missing_information=missing_information,
+            summary=summary,
         )
