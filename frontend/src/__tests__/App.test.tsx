@@ -106,5 +106,64 @@ describe("AegisPay AI / Aster Bank Console & Phone Simulator", () => {
     expect(screen.getByTestId("drawer-recommended-action")).toHaveTextContent("HOLD_FOR_INVESTIGATION");
     expect(screen.getByTestId("triggered-rules-list")).toBeInTheDocument();
     expect(screen.getByTestId("missing-evidence-list")).toBeInTheDocument();
+
+    // Verify Demo Fallback indicators for offline/seed assessment
+    expect(screen.getByTestId("assessment-source-badge")).toHaveTextContent(/Demo Fallback/i);
+    expect(screen.getByTestId("assessment-fallback-banner")).toBeInTheDocument();
+  });
+
+  it("distinguishes live backend assessments with Live Backend Assessment badge", async () => {
+    // Mock health check and risk evaluation API responding successfully
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/health/ready")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: "ready", database: "connected" }),
+        };
+      }
+      if (url.includes("/api/v1/risk/evaluate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            risk_score: 95,
+            risk_level: "CRITICAL",
+            recommended_action: "HOLD_FOR_INVESTIGATION",
+            explanation: "Live backend evaluation: critical coercion detected.",
+            triggered_rules: [
+              {
+                rule_id: "RULE_COERCION_AUTHORITY_PRESSURE",
+                rule_name: "Authority Impersonation",
+                description: "Authority duress markers detected",
+                weight: 30,
+                severity: "CRITICAL",
+                evidence: "Law enforcement threat detected",
+              },
+            ],
+            supporting_evidence: ["Severe coercion marker"],
+            missing_evidence: [],
+            source: "backend",
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+
+    render(<App />);
+
+    // Click phone-send-money to trigger a new payment with live backend evaluation
+    const sendBtn = screen.getByTestId("phone-send-money");
+    fireEvent.click(sendBtn);
+
+    // Switch to Risk assessment tab
+    const riskTab = screen.getByTestId("drawer-tab-risk-assessment");
+    fireEvent.click(riskTab);
+
+    // Verify Risk section rendered and updated from Live Backend
+    await waitFor(() => {
+      expect(screen.getByTestId("assessment-source-badge")).toHaveTextContent(/Live Backend Assessment/i);
+      expect(screen.queryByTestId("assessment-fallback-banner")).not.toBeInTheDocument();
+    });
   });
 });

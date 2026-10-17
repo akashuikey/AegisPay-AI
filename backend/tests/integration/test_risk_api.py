@@ -247,3 +247,182 @@ async def test_assess_terminal_transaction_rejected(client: AsyncClient) -> None
     )
     assert assess_resp.status_code == 400
     assert assess_resp.json()["error"]["code"] == "INVALID_STATE_TRANSITION"
+
+
+@pytest.mark.asyncio
+async def test_repeated_assessment_rejected_on_already_assessed_transaction(
+    client: AsyncClient,
+) -> None:
+    """Verify repeated assessment attempt on DECISION_READY transaction is rejected with 400."""
+    tx_resp = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_repeat_assess",
+            "idempotency_key": "idemp_repeat_001",
+            "amount": "30000.00",
+            "currency": "INR",
+            "payment_rail": "UPI",
+            "recipient_name": "Test Payee",
+            "recipient_identifier": "test@upi",
+        },
+    )
+    assert tx_resp.status_code == 201
+    tx_id = tx_resp.json()["id"]
+
+    # First assessment: transitions INITIATED -> ASSESSING -> RISK_ASSESSED -> DECISION_READY
+    first_assess = await client.post(
+        f"/api/v1/transactions/{tx_id}/assess",
+        json={
+            "evidence": {
+                "amount": "30000.00",
+                "recipient_name": "Test Payee",
+                "recipient_identifier": "test@upi",
+                "is_first_time_recipient": True,
+            }
+        },
+    )
+    assert first_assess.status_code == 200
+    assert first_assess.json()["source"] == "backend"
+
+    # Second assessment: attempt to re-assess DECISION_READY transaction fails
+    second_assess = await client.post(
+        f"/api/v1/transactions/{tx_id}/assess",
+        json={
+            "evidence": {
+                "amount": "30000.00",
+                "recipient_name": "Test Payee",
+                "recipient_identifier": "test@upi",
+            }
+        },
+    )
+    assert second_assess.status_code == 400
+    assert second_assess.json()["error"]["code"] == "INVALID_STATE_TRANSITION"
+
+    # But GET /assessment remains idempotent and retrieves the valid persisted result
+    get_assess = await client.get(f"/api/v1/transactions/{tx_id}/assessment")
+    assert get_assess.status_code == 200
+    assert get_assess.json()["id"] == first_assess.json()["id"]
+    assert get_assess.json()["source"] == "backend"
+
+
+@pytest.mark.asyncio
+async def test_complete_valid_workflow_lifecycle_and_audits(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Verify complete journey from INITIATED to CANCELLED_SIMULATED with atomic audits."""
+    # 1. Create transaction
+    tx_resp = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_lifecycle_001",
+            "idempotency_key": "idemp_life_001",
+            "amount": "75000.00",
+            "payment_rail": "IMPS",
+            "recipient_name": "Suspect Payee",
+            "recipient_identifier": "suspect@upi",
+        },
+    )
+    tx_id_str = tx_resp.json()["id"]
+
+    # 2. Assess -> DECISION_READY
+    assess_resp = await client.post(
+        f"/api/v1/transactions/{tx_id_str}/assess",
+        json={
+            "evidence": {
+                "amount": "75000.00",
+                "recipient_name": "Suspect Payee",
+                "recipient_identifier": "suspect@upi",
+                "is_first_time_recipient": True,
+                "guaranteed_return_claimed": True,
+                "instruction_to_ignore_bank_warnings": True,
+            }
+        },
+    )
+    assert assess_resp.status_code == 200
+
+    # 3. Decision -> HELD_FOR_VERIFICATION
+    hold_resp = await client.post(
+        f"/api/v1/transactions/{tx_id_str}/transitions",
+        json={
+            "target_state": "HELD_FOR_VERIFICATION",
+            "reason": "Simulated hold enforced based on risk recommendation",
+            "actor_type": "SYSTEM",
+        },
+    )
+    assert hold_resp.status_code == 200
+    assert hold_resp.json()["state"] == "HELD_FOR_VERIFICATION"
+
+    # 4. HELD_FOR_VERIFICATION -> CANCELLED_SIMULATED
+    cancel_resp = await client.post(
+        f"/api/v1/transactions/{tx_id_str}/transitions",
+        json={
+            "target_state": "CANCELLED_SIMULATED",
+            "reason": "Customer cancelled transfer after high-yield scam warning",
+            "actor_type": "CUSTOMER",
+        },
+    )
+    assert cancel_resp.status_code == 200
+    assert cancel_resp.json()["state"] == "CANCELLED_SIMULATED"
+
+    # 5. Attempting to transition from terminal state fails
+    terminal_resp = await client.post(
+        f"/api/v1/transactions/{tx_id_str}/transitions",
+        json={
+            "target_state": "SETTLED_SIMULATED",
+            "reason": "Illegal transition from terminal",
+            "actor_type": "INVESTIGATOR",
+        },
+    )
+    assert terminal_resp.status_code == 400
+    assert terminal_resp.json()["error"]["code"] == "INVALID_STATE_TRANSITION"
+
+    # 6. Verify audit history contains complete transition chain
+    audits_resp = await client.get(f"/api/v1/transactions/{tx_id_str}/audit")
+    assert audits_resp.status_code == 200
+    audits = audits_resp.json()["items"]
+    # Creation (INITIATED) + 3 assess transitions (ASSESSING, RISK_ASSESSED,
+    # DECISION_READY) + HELD + CANCELLED = 6 total
+    assert len(audits) == 6
+    expected_to_states = [
+        "INITIATED",
+        "ASSESSING",
+        "RISK_ASSESSED",
+        "DECISION_READY",
+        "HELD_FOR_VERIFICATION",
+        "CANCELLED_SIMULATED",
+    ]
+    for i, expected_state in enumerate(expected_to_states):
+        assert audits[i]["to_state"] == expected_state
+
+
+@pytest.mark.asyncio
+async def test_simulated_action_guardrails_reject_real_banking_actions(
+    client: AsyncClient,
+) -> None:
+    """Verify API schema strictly enforces _SIMULATED suffix and rejects real state names."""
+    tx_resp = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_sim_guard",
+            "idempotency_key": "idemp_sim_001",
+            "amount": "5000.00",
+            "payment_rail": "UPI",
+            "recipient_name": "Test Payee",
+            "recipient_identifier": "test@upi",
+        },
+    )
+    tx_id = tx_resp.json()["id"]
+
+    # Attempt to transition to un-simulated "SETTLED"
+    bad_settle = await client.post(
+        f"/api/v1/transactions/{tx_id}/transitions",
+        json={"target_state": "SETTLED", "actor_type": "SYSTEM"},
+    )
+    assert bad_settle.status_code == 422  # Pydantic enum validation failure
+
+    # Attempt to transition to un-simulated "CANCELLED"
+    bad_cancel = await client.post(
+        f"/api/v1/transactions/{tx_id}/transitions",
+        json={"target_state": "CANCELLED", "actor_type": "CUSTOMER"},
+    )
+    assert bad_cancel.status_code == 422

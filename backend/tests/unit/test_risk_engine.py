@@ -191,3 +191,70 @@ def test_score_boundaries_clamping() -> None:
     )
     res_high = evaluate_risk(high_evidence)
     assert res_high.risk_score <= 100
+
+
+def test_active_call_alone_does_not_establish_fraud() -> None:
+    """Verify that being on an active call alone only raises a mild advisory and does not block."""
+    evidence = TransactionEvidence(
+        amount=Decimal("15000.00"),
+        recipient_name="Family Member",
+        recipient_identifier="family@upi",
+        active_call_present=True,
+        # Neutral / baseline signals
+        is_first_time_recipient=False,
+        is_trusted_beneficiary=True,
+        screen_sharing_active=False,
+        voice_stress_detected=False,
+        coercive_language_detected=False,
+        guaranteed_return_claimed=False,
+        recent_fd_liquidation=False,
+        is_flagged_mule=False,
+    )
+    result = evaluate_risk(evidence)
+    assert result.risk_score <= 10
+    assert result.risk_level == RiskLevel.LOW
+    assert result.recommended_action == RecommendedAction.ALLOW
+
+
+def test_active_call_and_voice_stress_alone_do_not_establish_fraud() -> None:
+    """Verify that combined active call and voice stress alone do not establish fraud or block."""
+    evidence = TransactionEvidence(
+        amount=Decimal("10000.00"),
+        recipient_name="Local Vendor",
+        recipient_identifier="vendor@upi",
+        active_call_present=True,
+        voice_stress_detected=True,
+        # No fraud, no coercion, no screen sharing
+        is_first_time_recipient=False,
+        is_trusted_beneficiary=False,
+        screen_sharing_active=False,
+        coercive_language_detected=False,
+        guaranteed_return_claimed=False,
+        recent_fd_liquidation=False,
+        is_flagged_mule=False,
+    )
+    result = evaluate_risk(evidence)
+    # Active call (+10) + Voice stress (+5) = 15 points
+    assert result.risk_score == 15
+    assert result.risk_level == RiskLevel.LOW
+    assert result.recommended_action == RecommendedAction.ALLOW
+    rule_ids = {r.rule_id for r in result.triggered_rules}
+    assert "RULE_ACTIVE_CALL_PRESENT" in rule_ids
+    assert "RULE_VOICE_STRESS_ADVISORY" in rule_ids
+    assert "RULE_CALL_AND_SCREEN_SHARE" not in rule_ids
+
+
+def test_risk_assessment_response_schema_defaults_source_backend() -> None:
+    """Verify RiskAssessmentResponse schema contains source field with default 'backend'."""
+    from app.schemas.risk import RiskAssessmentResponse
+
+    resp = RiskAssessmentResponse(
+        risk_score=20,
+        risk_level=RiskLevel.LOW,
+        recommended_action=RecommendedAction.ALLOW,
+        explanation="Baseline check",
+        triggered_rules=[],
+        supporting_evidence=[],
+        missing_evidence=[],
+    )
+    assert resp.source == "backend"

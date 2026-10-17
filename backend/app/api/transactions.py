@@ -191,6 +191,7 @@ async def assess_transaction(
         ],
         supporting_evidence=assessment.supporting_evidence,
         missing_evidence=assessment.missing_evidence,
+        source="backend",
         created_at=assessment.created_at,
     )
 
@@ -227,5 +228,6 @@ async def get_latest_transaction_assessment(
         ],
         supporting_evidence=assessment.supporting_evidence,
         missing_evidence=assessment.missing_evidence,
+        source="backend",
         created_at=assessment.created_at,
     )

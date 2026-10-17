@@ -151,6 +151,55 @@
 
 ---
 
+#### Task P1-A4: Risk Engine Verification and Demo Readiness
+- **Owner / Agent**: Senior Software Architect / Full-Stack Engineer (Agent 4)
+- **Status**: `DONE`
+- **Objective**: Verify the completed P1-A1 through P1-A3 implementation, fix confirmed issues, test boundaries, verify offline fallback clarity, ensure clean database migration parity, and establish reliable end-to-end demo readiness before starting Phase 2.
+- **Dependencies**: Tasks P1-A1, P1-A2, and P1-A3 completion.
+- **Acceptance Criteria**:
+  - [x] All six scenario fixtures executed and verified against the actual deterministic risk engine with explainable scores, rules, missing signals, and recommendations.
+  - [x] Verified active-call alone and voice-stress alone do not establish fraud or cause blocks (covered in unit tests).
+  - [x] Verified trusted recipients do not override strong coercion indicators (coercion bypass guardrail).
+  - [x] Verified ambiguous evidence remains ambiguous without auto-blocking (requires verification, records missing fields).
+  - [x] Backend and frontend behavior verified when API is unavailable; clearly distinguished live backend assessments (`Live Backend Assessment` green badge) from demo fallback results (`Demo Fallback (Offline Mode)` amber badge and informative banner).
+  - [x] Tested assessment persistence, repeated requests (rejected on DECISION_READY transactions), concurrent transitions (optimistic locking 409), complete valid lifecycle transitions, and atomic audit records.
+  - [x] Verified endpoint authorization and validation boundaries; confirmed real banking action names (`SETTLED`, `CANCELLED`) are rejected and only `_SIMULATED` terminal states are accepted.
+  - [x] Confirmed migrations run cleanly from a blank PostgreSQL database from base to head (`0001` -> `0002` -> `0003`) with all relations created.
+  - [x] All quality gates (Ruff, mypy, pytest, ESLint, tsc, Vitest, make check-all) pass with 100% success (84 backend tests, 10 frontend tests).
+- **Verification Commands & Results**:
+  ```bash
+  # Clean Database Migration Test
+  docker exec -i aegispay_postgres psql -U aegispay_user -d postgres -c "CREATE DATABASE test_clean_aegispay;"
+  DATABASE_URL="postgresql+psycopg://aegispay_user:aegispay_dev_pw@127.0.0.1:5433/test_clean_aegispay" cd backend && uv run alembic upgrade head
+  # Applied 0001_initial_baseline -> 0002_transactions -> 0003_transaction_assessments
+
+  # Verification Suite
+  make check-all
+  # Backend:
+  # - ruff check: All checks passed!
+  # - ruff format: 41 files already formatted
+  # - mypy app: Success: no issues found in 28 source files
+  # - pytest: 84 passed in 1.68s
+  # Frontend:
+  # - eslint: 0 errors
+  # - tsc: 0 errors
+  # - vitest: 10 passed in 2 test files
+  # - vite build: built in 576ms
+  ```
+- **Execution Log & Blocker Notes**:
+  - Executed all 6 benchmark fraud scenarios on the pure deterministic engine:
+    1. Digital arrest: Score 100, CRITICAL, HOLD_FOR_INVESTIGATION (High-value, new recipient, recent FD liquidation, concurrent call & screen share, authority duress, voice stress advisory).
+    2. High-yield investment fraud: Score 65, HIGH, HOLD_FOR_INVESTIGATION (Elevated amount, new recipient, guaranteed return scheme, coached to ignore warnings).
+    3. Fake invoice: Score 45, MEDIUM, REQUIRE_VERIFICATION (New recipient, invoice beneficiary identity / routing mismatch).
+    4. Mule network: Score 80, CRITICAL, HOLD_FOR_INVESTIGATION (New recipient, consortium mule hit, abnormal fan-in/fan-out velocity).
+    5. Legitimate high-value: Score 0, LOW, ALLOW (High-value anomaly mitigated by established trusted beneficiary).
+    6. Ambiguous payment: Score 30, MEDIUM, REQUIRE_VERIFICATION (Elevated amount, new recipient, active call; 8 missing fields explicitly preserved as unknown; no automatic block).
+  - Explicitly differentiated live backend assessments from demo fallback via `source: 'backend'` vs `source: 'demo_fallback'` in schemas, API client, table pill (`DEMO`), and drawer header badge with fallback banner.
+  - Added regression & verification tests for repeated assessments on terminal/decision states, atomic transition lifecycle audits, optimistic concurrency, and simulated action guardrails.
+  - Zero Phase 2 AI investigation code introduced. Total tests: 84 backend + 10 frontend (94 tests total, 100% green). Blockers: None.
+
+---
+
 ### Phase 2: AI Investigation Agent & Multi-Modal Context Analysis
 - **Task P2-A1**: Gemini Multimodal Contextual Ingestion & Document Verification (`NOT_STARTED`)
 - **Task P2-A2**: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)

@@ -1530,11 +1530,23 @@ function App() {
                                 </td>
                                 <td>{checkReason(tx, policyLimit)}</td>
                                 <td>
-                                  <span className={`pill ${riskTone}`} data-testid={`risk-score-${tx.id}`}>
-                                    {tx.assessment
-                                      ? `${tx.assessment.risk_score} · ${tx.assessment.risk_level}`
-                                      : 'Assessing…'}
-                                  </span>
+                                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                    <span className={`pill ${riskTone}`} data-testid={`risk-score-${tx.id}`}>
+                                      {tx.assessment
+                                        ? `${tx.assessment.risk_score} · ${tx.assessment.risk_level}`
+                                        : 'Assessing…'}
+                                    </span>
+                                    {tx.assessment?.source === 'demo_fallback' && (
+                                      <span
+                                        className="pill amber"
+                                        style={{ fontSize: 9, padding: '1px 5px', opacity: 0.9 }}
+                                        title="Offline demo fallback evaluation"
+                                        data-testid={`risk-source-${tx.id}`}
+                                      >
+                                        DEMO
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
                                 <td>
                                   <span
@@ -2383,7 +2395,27 @@ function TransactionDrawer({
 
         {tab === 'Risk assessment' && (
           <section className="drawer-section" data-testid="drawer-risk-section">
-            <h3>Deterministic Risk Assessment</h3>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              <h3 style={{ margin: 0 }}>Deterministic Risk Assessment</h3>
+              <span
+                className={`pill ${tx.assessment?.source === 'demo_fallback' ? 'amber' : 'green'}`}
+                data-testid="assessment-source-badge"
+                style={{ fontSize: 10, fontWeight: 600 }}
+              >
+                {tx.assessment?.source === 'demo_fallback' ? 'Demo Fallback (Offline Mode)' : 'Live Backend Assessment'}
+              </span>
+            </div>
+
+            {tx.assessment?.source === 'demo_fallback' && (
+              <div className="notice amber" style={{ margin: '0 0 12px 0' }} data-testid="assessment-fallback-banner">
+                <ShieldAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
+                <span>
+                  <strong>Demo Mode Fallback:</strong> The backend API is unreachable. This score was evaluated
+                  locally using deterministic policy rules for demonstration purposes.
+                </span>
+              </div>
+            )}
+
             <div className="payment-summary" style={{ gridTemplateColumns: '1.2fr 1fr 1fr' }}>
               <div className="metric">
                 <div className="metric-label">RISK SCORE</div>

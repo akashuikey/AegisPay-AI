@@ -156,6 +156,7 @@ class RiskAssessmentResponse(BaseModel):
     triggered_rules: list[TriggeredRuleResponse]
     supporting_evidence: list[str]
     missing_evidence: list[str]
+    source: str = Field(default="backend", description="Source of assessment evaluation")
     created_at: datetime | None = None
 
 

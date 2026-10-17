@@ -32,6 +32,7 @@ export interface RiskAssessmentResponse {
   supporting_evidence: string[];
   missing_evidence: string[];
   created_at?: string | null;
+  source?: 'backend' | 'demo_fallback';
 }
 
 export interface TransactionEvidenceInput {
@@ -478,6 +479,7 @@ export function evaluateRiskLocally(evidence: TransactionEvidenceInput): RiskAss
     triggered_rules: rules,
     supporting_evidence: supporting,
     missing_evidence: missing,
+    source: 'demo_fallback',
   };
 }
 
@@ -495,13 +497,16 @@ export async function evaluateRiskApi(evidence: TransactionEvidenceInput): Promi
     });
 
     if (response.ok) {
-      return (await response.json()) as RiskAssessmentResponse;
+      const data = (await response.json()) as RiskAssessmentResponse;
+      return { ...data, source: 'backend' };
     }
     console.warn(`Backend risk API returned ${response.status}. Using local deterministic evaluation fallback.`);
-    return evaluateRiskLocally(evidence);
+    const fallback = evaluateRiskLocally(evidence);
+    return { ...fallback, source: 'demo_fallback' };
   } catch (err) {
     console.warn('Backend risk API unreachable. Using local deterministic evaluation fallback.', err);
-    return evaluateRiskLocally(evidence);
+    const fallback = evaluateRiskLocally(evidence);
+    return { ...fallback, source: 'demo_fallback' };
   }
 }
 

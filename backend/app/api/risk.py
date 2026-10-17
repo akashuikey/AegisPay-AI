@@ -62,6 +62,7 @@ async def evaluate_transaction_risk(
         ],
         supporting_evidence=result.supporting_evidence,
         missing_evidence=result.missing_evidence,
+        source="backend",
     )
 
 
