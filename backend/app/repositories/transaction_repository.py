@@ -15,6 +15,7 @@ from app.db.models import (
     InvestigationConversationTurnModel,
     TransactionAssessmentModel,
     TransactionAuditModel,
+    TransactionDecisionModel,
     TransactionInvestigationModel,
     TransactionModel,
 )
@@ -199,6 +200,26 @@ class TransactionRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def create_decision(self, decision: TransactionDecisionModel) -> TransactionDecisionModel:
+        """Persist an automated workflow decision record."""
+        self.session.add(decision)
+        await self.session.commit()
+        await self.session.refresh(decision)
+        return decision
+
+    async def get_latest_decision_for_transaction(
+        self, transaction_id: UUID
+    ) -> TransactionDecisionModel | None:
+        """Retrieve the most recent decision record for a transaction."""
+        stmt = (
+            select(TransactionDecisionModel)
+            .where(TransactionDecisionModel.transaction_id == transaction_id)
+            .order_by(TransactionDecisionModel.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def create_conversation(
         self, conversation: InvestigationConversationModel

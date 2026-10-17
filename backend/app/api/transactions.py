@@ -9,13 +9,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.conversations import serialize_conversation_response
 from app.api.investigations import (
     _serialize_investigation_response,
+    get_default_ai_client,
     get_investigation_service,
 )
+from app.db.models import TransactionDecisionModel
 from app.db.session import get_db_session
+from app.domain.decision_policy import PolicyAction
 from app.domain.risk_engine import RecommendedAction, RiskLevel
 from app.repositories.transaction_repository import TransactionRepository
+from app.schemas.decision import DecisionResponse, EvaluateTransactionRequest
 from app.schemas.investigation import (
     AddConversationTurnRequest,
+    InvestigateTransactionRequest,
     InvestigationConversationListResponse,
     InvestigationConversationResponse,
     InvestigationListResponse,
@@ -34,6 +39,8 @@ from app.schemas.transaction import (
     TransactionResponse,
     TransitionTransactionRequest,
 )
+from app.services.ai_client import AIInvestigationClient
+from app.services.decision_workflow_service import DecisionWorkflowService
 from app.services.investigation_service import InvestigationService
 from app.services.risk_service import RiskService
 from app.services.transaction_service import TransactionService
@@ -356,3 +363,110 @@ async def submit_transaction_conversation_turn(
         transaction_id=transaction_id,
     )
     return serialize_conversation_response(record)
+
+
+def get_decision_workflow_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    ai_client: Annotated[AIInvestigationClient, Depends(get_default_ai_client)],
+) -> DecisionWorkflowService:
+    """Dependency provider wiring the automated decision workflow with a request session."""
+    repository = TransactionRepository(session)
+    transaction_service = TransactionService(repository)
+    risk_service = RiskService(repository, transaction_service)
+    investigation_service = InvestigationService(repository, transaction_service, ai_client)
+    return DecisionWorkflowService(
+        repository, transaction_service, risk_service, investigation_service
+    )
+
+
+def _serialize_decision(
+    record: TransactionDecisionModel, transaction_state: str
+) -> DecisionResponse:
+    """Serialize a persisted decision record plus the current transaction state."""
+    return DecisionResponse(
+        id=record.id,
+        transaction_id=record.transaction_id,
+        transaction_state=transaction_state,
+        policy_version=record.policy_version,
+        action=PolicyAction(record.action),
+        risk_score=record.risk_score,
+        risk_level=RiskLevel(record.risk_level),
+        requires_verification=record.requires_verification,
+        provider_failed=record.provider_failed,
+        investigation_performed=record.investigation_id is not None or record.provider_failed,
+        from_state=record.from_state,
+        to_state=record.to_state,
+        workflow_status=record.workflow_status,
+        reason_codes=record.reason_codes,
+        triggered_rule_ids=record.triggered_rule_ids,
+        investigation_finding_refs=record.investigation_finding_refs,
+        supporting_evidence_refs=record.supporting_evidence_refs,
+        missing_information=record.missing_information,
+        explanation=record.explanation,
+        created_at=record.created_at,
+    )
+
+
+@router.post(
+    "/{transaction_id}/evaluate",
+    response_model=DecisionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Run automated decision workflow",
+    description=(
+        "Runs the automated end-to-end workflow: deterministic risk assessment, optional "
+        "contextual investigation, deterministic policy decision, and the corresponding "
+        "simulated state transition. Idempotent: a repeat request returns the existing decision."
+    ),
+)
+async def evaluate_transaction(
+    transaction_id: UUID,
+    request: EvaluateTransactionRequest,
+    response: Response,
+    service: Annotated[DecisionWorkflowService, Depends(get_decision_workflow_service)],
+) -> DecisionResponse:
+    """Execute the automated risk + policy decision workflow for a transaction."""
+    evidence = request.evidence.to_domain() if request.evidence else None
+
+    investigation_request: InvestigateTransactionRequest | None = None
+    if request.investigation is not None:
+        inv = request.investigation
+        investigation_request = InvestigateTransactionRequest(
+            transaction_id=transaction_id,
+            customer_statements=inv.customer_statements,
+            document_extractions=inv.document_extractions,
+            telephony_telemetry=inv.telephony_telemetry,
+            recipient_intelligence=inv.recipient_intelligence,
+            coercion_cues=inv.coercion_cues,
+            correlation_id=request.correlation_id,
+        )
+
+    decision, tx, created = await service.evaluate(
+        transaction_id=transaction_id,
+        evidence=evidence,
+        investigation_request=investigation_request,
+        run_investigation=request.run_investigation,
+        correlation_id=request.correlation_id,
+    )
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return _serialize_decision(decision, tx.state)
+
+
+@router.get(
+    "/{transaction_id}/decision",
+    response_model=DecisionResponse,
+    summary="Get latest automated decision",
+    description="Retrieve the most recent automated decision and its reasons for a transaction.",
+)
+async def get_transaction_decision(
+    transaction_id: UUID,
+    service: Annotated[DecisionWorkflowService, Depends(get_decision_workflow_service)],
+) -> DecisionResponse:
+    """Fetch the latest automated decision for a transaction."""
+    decision = await service.get_latest_decision(transaction_id)
+    if decision is None:
+        from app.core.errors import NotFoundError
+
+        raise NotFoundError(f"No automated decision found for transaction '{transaction_id}'")
+    tx = await service.transaction_service.get_transaction(transaction_id)
+    return _serialize_decision(decision, tx.state)

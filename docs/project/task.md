@@ -462,6 +462,60 @@
   - Recommended next milestone: P2-A3 voice duress agent (still NOT_STARTED) or an authorized human
     decision/adjudication workflow that writes state via the existing state machine.
 
+#### Task P2-A4: Automated Fraud Prevention & Transaction Orchestration
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer
+- **Status**: `DONE`
+- **Objective**: Automated end-to-end decision workflow — evaluate a simulated payment, combine
+  deterministic risk with optional investigation evidence, select a permitted action via a
+  deterministic policy engine, execute the corresponding simulated state transition, and persist
+  an auditable, idempotent decision. Reuses the existing state machine, risk engine, P2-A1
+  investigation, P2-A2 conversation, and P2-A2.1 auth. See [ADR-003](../decisions/ADR-003-automated-decision-workflow.md).
+- **Deliverables**:
+  1. `app/domain/decision_policy.py` — pure deterministic policy engine (`POLICY_VERSION=p2a4.v1`);
+     `PolicyAction` enum (ALLOW / REQUIRE_VERIFICATION / HOLD_FOR_INVESTIGATION / BLOCK); typed
+     `PolicyInput`/`PolicyDecision`; investigation can only escalate the conservative baseline,
+     confidence score never read, BLOCK only on verified consortium mule hit at CRITICAL.
+  2. `app/services/decision_workflow_service.py` — orchestration (risk → optional investigation →
+     policy → transition → decision persistence); provider-failure fallback; idempotency; optimistic
+     concurrency handling.
+  3. `TransactionDecisionModel` + Alembic migration `0007_create_transaction_decisions` (verified on
+     a clean DB, downgrade/upgrade cycle, and the existing populated DB).
+  4. Repository methods `create_decision`, `get_latest_decision_for_transaction`.
+  5. Schemas `app/schemas/decision.py` (`EvaluateTransactionRequest`, `WorkflowRiskEvidence`
+     reusing the risk evidence fields with amount taken from the transaction, `DecisionResponse`).
+  6. Authenticated API on the existing transactions router: `POST /api/v1/transactions/{id}/evaluate`
+     (idempotent: 201 on first, 200 on replay) and `GET /api/v1/transactions/{id}/decision`.
+  7. Frontend: `frontend/src/api/decisionApi.ts` (evaluate + get-latest via `apiFetch`); decision
+     section added to the existing `InvestigationReviewPanel` (action, reason codes, risk, verification
+     requirement, from→to state, provider-failure fallback, simulated-outcome labeling, run/replay
+     button with duplicate-click guard). No second dashboard.
+- **Boundaries**: policy engine never mutates state; LLM never chooses the action; voice-stress-alone
+  never a fraud verdict; missing/failed AI never makes high-risk safe; all outcomes are simulated
+  states (no real transfer); auth required on both endpoints.
+- **Verification Commands & Results**:
+  ```bash
+  cd backend
+  POSTGRES_PORT=5433 uv run alembic upgrade head   # 0006 -> 0007 (clean + existing DB; downgrade ok)
+  uv run ruff check .      # All checks passed!
+  uv run ruff format --check .   # 66 files already formatted
+  uv run mypy app          # Success: no issues found in 47 source files
+  POSTGRES_PORT=5433 uv run pytest   # 172 passed (+24: 11 policy unit, 13 workflow/API)
+  cd ../frontend
+  npm run lint && npm run typecheck  # clean
+  npm run test             # 34 passed (+5 decision tests)
+  npm run build            # built OK
+  # Live uvicorn smoke (AI_PROVIDER=mock): high-risk coercion -> HOLD -> HELD_FOR_VERIFICATION
+  #   (simulated); idempotent re-evaluate = 200, stays HELD; low-risk -> ALLOW -> SETTLED_SIMULATED
+  #   (investigation skipped); unauthenticated evaluate = 401. Server log clean.
+  ```
+- **Known limitations**:
+  - Decision row and state transition are separate commits; the atomic authoritative record is the
+    `transaction_audits` entry (atomicity across the two is NOT claimed — documented in ADR-003).
+  - No human adjudication step yet to advance HELD / VERIFICATION_REQUIRED transactions.
+  - Workflow runs synchronously (bounded by provider timeout/retries); no async queue.
+  - Not public-production ready (inherits P2-A2.1 gaps: `/auth/login` rate limiting, HTTPS/CORS).
+  - Recommended next: a human decision/adjudication workflow, or the P2-A3b voice duress agent.
+
 #### Task P2-A3b: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
 
 ---

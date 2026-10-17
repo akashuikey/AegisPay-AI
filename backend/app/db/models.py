@@ -177,6 +177,14 @@ class TransactionModel(Base):
         order_by="InvestigationConversationModel.created_at.desc()",
     )
 
+    # Relationship to automated decision records
+    decisions: Mapped[list["TransactionDecisionModel"]] = relationship(
+        "TransactionDecisionModel",
+        back_populates="transaction",
+        cascade="all, delete-orphan",
+        order_by="TransactionDecisionModel.created_at.desc()",
+    )
+
 
 class TransactionAuditModel(Base):
     """Append-only audit trail recording state transitions and lifecycle events."""
@@ -385,6 +393,70 @@ class TransactionInvestigationModel(Base):
     transaction: Mapped["TransactionModel"] = relationship(
         "TransactionModel",
         back_populates="investigations",
+    )
+
+
+class TransactionDecisionModel(Base):
+    """Auditable automated decision record produced by the P2-A4 workflow.
+
+    Companion to the append-only ``transaction_audits`` trail: it stores the
+    structured policy decision (action, policy version, references, reason codes)
+    alongside the state transition it drove, so a decision can be reconstructed.
+    """
+
+    __tablename__ = "transaction_decisions"
+    __table_args__ = (Index("ix_transaction_decisions_tx_created", "transaction_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transaction_assessments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    investigation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transaction_investigations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    risk_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(32), nullable=False)
+    requires_verification: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    provider_failed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    from_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    to_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    workflow_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    triggered_rule_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    investigation_finding_refs: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    supporting_evidence_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    missing_information: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+
+    transaction: Mapped["TransactionModel"] = relationship(
+        "TransactionModel",
+        back_populates="decisions",
     )
 
 

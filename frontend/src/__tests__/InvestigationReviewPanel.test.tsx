@@ -2,10 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { InvestigationReviewPanel } from "../components/InvestigationReviewPanel";
 import * as investigationApi from "../api/investigationApi";
+import * as decisionApi from "../api/decisionApi";
 import type {
   InvestigationResponse,
   InvestigationListResponse,
 } from "../api/investigationApi";
+import type { DecisionResponse } from "../api/decisionApi";
 
 function makeInvestigation(
   overrides: Partial<InvestigationResponse> = {}
@@ -63,9 +65,38 @@ const baseProps = {
   riskLevel: "CRITICAL",
 };
 
+function makeDecision(overrides: Partial<DecisionResponse> = {}): DecisionResponse {
+  return {
+    id: "dec-1",
+    transaction_id: "tx-1",
+    transaction_state: "HELD_FOR_VERIFICATION",
+    policy_version: "p2a4.v1",
+    action: "HOLD_FOR_INVESTIGATION",
+    risk_score: 100,
+    risk_level: "CRITICAL",
+    requires_verification: false,
+    provider_failed: false,
+    investigation_performed: true,
+    from_state: "DECISION_READY",
+    to_state: "HELD_FOR_VERIFICATION",
+    workflow_status: "HELD_FOR_INVESTIGATION",
+    reason_codes: ["RISK_LEVEL_CRITICAL", "DETERMINISTIC_BASELINE_HOLD_FOR_INVESTIGATION"],
+    triggered_rule_ids: ["RULE_COERCION_AUTHORITY_PRESSURE"],
+    investigation_finding_refs: ["FINDING-COERCION"],
+    supporting_evidence_refs: ["stmt_1"],
+    missing_information: [],
+    explanation: "Multiple strong risk indicators present; held from simulated settlement.",
+    simulated: true,
+    created_at: "2026-10-17T12:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("InvestigationReviewPanel", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    // Panel fetches the latest decision on mount; default to none unless a test overrides.
+    vi.spyOn(decisionApi, "getLatestDecisionApi").mockResolvedValue(null);
   });
   afterEach(() => {
     vi.clearAllMocks();
@@ -308,4 +339,119 @@ describe("InvestigationReviewPanel", () => {
     await waitFor(() => expect(screen.getByText("MULE_VELOCITY")).toBeInTheDocument());
     expect(screen.queryByText("AUTHORITY_COERCION")).not.toBeInTheDocument();
   });
+
+  it("renders an existing automated decision with action, status, and reasons", async () => {
+    vi.spyOn(investigationApi, "fetchInvestigationsForTransactionApi").mockResolvedValue(
+      listOf([makeInvestigation()])
+    );
+    vi.spyOn(decisionApi, "getLatestDecisionApi").mockResolvedValue(makeDecision());
+    render(<InvestigationReviewPanel {...baseProps} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("decision-content")).toBeInTheDocument()
+    );
+    expect(screen.getByTestId("decision-action")).toHaveTextContent(/hold for investigation/i);
+    expect(screen.getByTestId("decision-workflow-status")).toHaveTextContent(
+      "HELD_FOR_INVESTIGATION"
+    );
+    expect(screen.getByTestId("decision-to-state")).toHaveTextContent("HELD_FOR_VERIFICATION");
+    expect(screen.getByText("RISK_LEVEL_CRITICAL")).toBeInTheDocument();
+    // Simulated outcome is clearly labeled (never presented as a real transfer).
+    expect(screen.getByText(/simulated outcome/i)).toBeInTheDocument();
+    expect(screen.getByText(/not real bank transfers/i)).toBeInTheDocument();
+  });
+
+  it("renders distinct decision outcomes (allow / verification / block / fallback)", async () => {
+    vi.spyOn(investigationApi, "fetchInvestigationsForTransactionApi").mockResolvedValue(
+      listOf([makeInvestigation()])
+    );
+    vi.spyOn(decisionApi, "getLatestDecisionApi").mockResolvedValue(
+      makeDecision({
+        action: "REQUIRE_VERIFICATION",
+        requires_verification: true,
+        provider_failed: true,
+        to_state: "VERIFICATION_REQUIRED",
+        workflow_status: "VERIFICATION_REQUIRED",
+      })
+    );
+    render(<InvestigationReviewPanel {...baseProps} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("decision-requires-verification")).toBeInTheDocument()
+    );
+    expect(screen.getByTestId("decision-provider-failed")).toBeInTheDocument();
+  });
+
+  it("shows an empty decision prompt and runs evaluation on click", async () => {
+    vi.spyOn(investigationApi, "fetchInvestigationsForTransactionApi").mockResolvedValue(
+      listOf([makeInvestigation()])
+    );
+    vi.spyOn(decisionApi, "getLatestDecisionApi").mockResolvedValue(null);
+    const evalSpy = vi
+      .spyOn(decisionApi, "evaluateTransactionApi")
+      .mockResolvedValue(makeDecision({ action: "ALLOW", to_state: "SETTLED_SIMULATED" }));
+
+    render(<InvestigationReviewPanel {...baseProps} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("button-run-evaluation")).toBeInTheDocument()
+    );
+    expect(screen.getByText(/No automated decision yet/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("button-run-evaluation"));
+    await waitFor(() =>
+      expect(screen.getByTestId("decision-action")).toHaveTextContent(/allow/i)
+    );
+    expect(evalSpy).toHaveBeenCalledWith("tx-1");
+    expect(evalSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fire duplicate evaluations from rapid repeated clicks", async () => {
+    vi.spyOn(investigationApi, "fetchInvestigationsForTransactionApi").mockResolvedValue(
+      listOf([makeInvestigation()])
+    );
+    vi.spyOn(decisionApi, "getLatestDecisionApi").mockResolvedValue(null);
+    let resolveEval: (v: DecisionResponse) => void = () => {};
+    const evalSpy = vi
+      .spyOn(decisionApi, "evaluateTransactionApi")
+      .mockImplementation(
+        () => new Promise<DecisionResponse>((res) => {
+          resolveEval = res;
+        })
+      );
+
+    render(<InvestigationReviewPanel {...baseProps} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("button-run-evaluation")).toBeInTheDocument()
+    );
+    const btn = screen.getByTestId("button-run-evaluation");
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(evalSpy).toHaveBeenCalledTimes(1);
+
+    resolveEval(makeDecision({ action: "ALLOW", to_state: "SETTLED_SIMULATED" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("decision-action")).toBeInTheDocument()
+    );
+  });
+
+  it("surfaces an evaluation error without crashing the panel", async () => {
+    vi.spyOn(investigationApi, "fetchInvestigationsForTransactionApi").mockResolvedValue(
+      listOf([makeInvestigation()])
+    );
+    vi.spyOn(decisionApi, "getLatestDecisionApi").mockResolvedValue(null);
+    vi.spyOn(decisionApi, "evaluateTransactionApi").mockRejectedValue(
+      new Error("Automated evaluation failed (500): server error")
+    );
+    render(<InvestigationReviewPanel {...baseProps} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("button-run-evaluation")).toBeInTheDocument()
+    );
+    fireEvent.click(screen.getByTestId("button-run-evaluation"));
+    await waitFor(() =>
+      expect(screen.getByTestId("decision-error-alert")).toBeInTheDocument()
+    );
+    // Panel still renders its investigation content.
+    expect(screen.getByTestId("review-content")).toBeInTheDocument();
+  });
+
 });

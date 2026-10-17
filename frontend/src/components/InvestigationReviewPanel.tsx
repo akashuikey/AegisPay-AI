@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   FileSearch,
+  Gavel,
   HelpCircle,
   Info,
   RefreshCw,
@@ -25,6 +26,12 @@ import {
   InvestigationResponse,
   fetchInvestigationsForTransactionApi,
 } from '../api/investigationApi';
+import {
+  DecisionResponse,
+  PolicyAction,
+  evaluateTransactionApi,
+  getLatestDecisionApi,
+} from '../api/decisionApi';
 
 interface InvestigationReviewPanelProps {
   transactionId: string;
@@ -74,6 +81,28 @@ function severityTone(severity: string): string {
   return 'slate';
 }
 
+function actionTone(action: PolicyAction): string {
+  switch (action) {
+    case 'ALLOW':
+      return 'green';
+    case 'REQUIRE_VERIFICATION':
+      return 'blue';
+    case 'HOLD_FOR_INVESTIGATION':
+      return 'amber';
+    case 'BLOCK':
+      return 'red';
+    default:
+      return 'slate';
+  }
+}
+
+const ACTION_LABEL: Record<PolicyAction, string> = {
+  ALLOW: 'Allow (simulated settlement)',
+  REQUIRE_VERIFICATION: 'Require verification',
+  HOLD_FOR_INVESTIGATION: 'Hold for investigation',
+  BLOCK: 'Block (simulated cancellation)',
+};
+
 interface EvidenceIndexEntry {
   reference: string;
   provenances: Set<EvidenceProvenance>;
@@ -111,6 +140,43 @@ export function InvestigationReviewPanel({
   // Guard against overlapping/duplicate fetches from rapid repeated clicks.
   const inFlight = useRef<boolean>(false);
 
+  // Automated decision workflow (P2-A4).
+  const [decision, setDecision] = useState<DecisionResponse | null>(null);
+  const [evaluating, setEvaluating] = useState<boolean>(false);
+  const [evaluateError, setEvaluateError] = useState<string | null>(null);
+  const evaluateInFlight = useRef<boolean>(false);
+
+  const loadDecision = useCallback(async () => {
+    try {
+      const latest = await getLatestDecisionApi(transactionId);
+      setDecision(latest);
+    } catch {
+      // A decision fetch failure is non-fatal for the review panel; leave it unset.
+      setDecision(null);
+    }
+  }, [transactionId]);
+
+  const handleEvaluate = useCallback(async () => {
+    if (evaluateInFlight.current) return;
+    evaluateInFlight.current = true;
+    setEvaluating(true);
+    setEvaluateError(null);
+    try {
+      const result = await evaluateTransactionApi(transactionId);
+      setDecision(result);
+      // Refresh findings the decision may have considered.
+      await loadInvestigationsRef.current?.();
+    } catch (err: unknown) {
+      setEvaluateError(err instanceof Error ? err.message : 'Automated evaluation failed');
+    } finally {
+      evaluateInFlight.current = false;
+      setEvaluating(false);
+    }
+  }, [transactionId]);
+
+  // Ref indirection so handleEvaluate can refresh investigations without a dependency cycle.
+  const loadInvestigationsRef = useRef<(() => Promise<void>) | null>(null);
+
   const loadInvestigations = useCallback(async () => {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -145,8 +211,13 @@ export function InvestigationReviewPanel({
   }, [transactionId]);
 
   useEffect(() => {
-    void loadInvestigations();
+    loadInvestigationsRef.current = loadInvestigations;
   }, [loadInvestigations]);
+
+  useEffect(() => {
+    void loadInvestigations();
+    void loadDecision();
+  }, [loadInvestigations, loadDecision]);
 
   const sortedFindings = investigation
     ? [...investigation.findings].sort(
@@ -209,6 +280,130 @@ export function InvestigationReviewPanel({
           deterministic policy and transaction state machine remain authoritative; this panel does
           not change transaction state.
         </span>
+      </div>
+
+      {/* Automated decision (P2-A4) */}
+      <div
+        style={{
+          border: '1px solid #e2e8f0',
+          borderRadius: 8,
+          padding: 12,
+          marginBottom: 14,
+        }}
+        data-testid="decision-section"
+      >
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: decision ? 10 : 0,
+            gap: 8,
+          }}
+        >
+          <SectionLabel icon={<Gavel size={12} color="#7c3aed" />} text="AUTOMATED DECISION" />
+          <button
+            className="button primary small"
+            onClick={() => void handleEvaluate()}
+            disabled={evaluating}
+            data-testid="button-run-evaluation"
+          >
+            {evaluating ? (
+              <>
+                <RefreshCw size={12} className="spin" /> Evaluating…
+              </>
+            ) : decision ? (
+              'Re-run evaluation'
+            ) : (
+              'Run automated evaluation'
+            )}
+          </button>
+        </div>
+
+        {evaluateError && (
+          <div
+            role="alert"
+            data-testid="decision-error-alert"
+            style={{
+              background: '#fef2f2',
+              border: '1px solid #fecaca',
+              color: '#991b1b',
+              borderRadius: 6,
+              padding: '8px 10px',
+              fontSize: 12.5,
+              marginBottom: decision ? 10 : 0,
+            }}
+          >
+            {evaluateError}
+          </div>
+        )}
+
+        {decision ? (
+          <div data-testid="decision-content">
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+              <span
+                className={`pill ${actionTone(decision.action)}`}
+                data-testid="decision-action"
+              >
+                {ACTION_LABEL[decision.action]}
+              </span>
+              <span className="pill small slate" data-testid="decision-workflow-status">
+                {decision.workflow_status}
+              </span>
+              <span className="pill small blue">
+                Risk {decision.risk_level} ({decision.risk_score}/100)
+              </span>
+              {decision.requires_verification && (
+                <span className="pill small amber" data-testid="decision-requires-verification">
+                  Verification required
+                </span>
+              )}
+              {decision.provider_failed && (
+                <span className="pill small rose" data-testid="decision-provider-failed">
+                  AI unavailable · deterministic fallback
+                </span>
+              )}
+            </div>
+
+            <p style={{ margin: '8px 0 6px 0', fontSize: 12.5, color: '#334155' }}>
+              {decision.explanation}
+            </p>
+
+            <div style={{ fontSize: 11, color: '#64748b' }}>
+              State: <span className="mono">{decision.from_state}</span> →{' '}
+              <span className="mono" data-testid="decision-to-state">
+                {decision.to_state}
+              </span>{' '}
+              · policy {decision.policy_version}
+            </div>
+
+            {decision.reason_codes.length > 0 && (
+              <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {decision.reason_codes.map((code) => (
+                  <span key={code} className="pill small" style={{ fontSize: 10 }}>
+                    {code}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {decision.investigation_finding_refs.length > 0 && (
+              <div style={{ marginTop: 6, fontSize: 10.5, color: '#64748b' }}>
+                Findings considered: {decision.investigation_finding_refs.join(', ')}
+              </div>
+            )}
+
+            <p style={{ margin: '8px 0 0 0', fontSize: 10.5, color: '#94a3b8' }}>
+              <strong>Simulated outcome.</strong> Settlement and cancellation are simulated states,
+              not real bank transfers.
+            </p>
+          </div>
+        ) : (
+          <p style={{ margin: '8px 0 0 0', fontSize: 12, color: '#64748b' }}>
+            No automated decision yet. Run the evaluation to apply the deterministic risk + policy
+            workflow and its simulated state transition.
+          </p>
+        )}
       </div>
 
       {/* Error state */}

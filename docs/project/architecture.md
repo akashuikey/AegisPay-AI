@@ -67,6 +67,22 @@ graph TD
 - `backend/app/repositories/`: Data access layer for transaction persistence, idempotency lookups, and audit history.
 - `backend/app/services/`: Application service orchestrating atomic transaction creation, transition validation, and audit recording.
 
+### Automated Decision Workflow (P2-A4)
+See [ADR-003](../decisions/ADR-003-automated-decision-workflow.md). A pure-domain
+deterministic **policy engine** (`app/domain/decision_policy.py`, versioned
+`p2a4.v1`) maps structured risk + investigation inputs to a typed action
+(`ALLOW`, `REQUIRE_VERIFICATION`, `HOLD_FOR_INVESTIGATION`, `BLOCK`). The
+`DecisionWorkflowService` orchestrates: deterministic risk assessment → optional
+investigation (skipped for low risk; failures fall back to deterministic rules
+without downgrading) → policy decision → the corresponding permitted transition
+via the existing state machine (`ALLOW→SETTLED_SIMULATED`,
+`REQUIRE_VERIFICATION→VERIFICATION_REQUIRED`, `HOLD→HELD_FOR_VERIFICATION`,
+`BLOCK→CANCELLED_SIMULATED`) → a persisted `transaction_decisions` record
+(migration `0007`). The LLM never selects the action (findings only escalate the
+conservative baseline; confidence is never treated as probability). The workflow
+is idempotent (one decision per transaction) and protected by the existing
+operator auth boundary via `POST/GET /api/v1/transactions/{id}/evaluate|decision`.
+
 ### Transaction Lifecycle & State Machine (10 States)
 The transaction workflow finite state machine manages simulated payment progression across 10 workflow states:
 1. `INITIATED`: Transaction received and staged.
@@ -141,6 +157,7 @@ Allowed Transition Matrix:
 
 - [ADR-001: Initial Architecture Baseline](../decisions/ADR-001-initial-architecture.md)
 - [ADR-002: Operator Authentication & Authorization Boundary](../decisions/ADR-002-operator-authentication.md)
+- [ADR-003: Automated Decision Workflow & Deterministic Policy Engine](../decisions/ADR-003-automated-decision-workflow.md)
 
 ---
 
