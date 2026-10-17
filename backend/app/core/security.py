@@ -80,7 +80,14 @@ def decode_access_token(token: str, settings: Settings) -> str:
     """
     secret = _require_secret(settings)
     try:
-        payload = jwt.decode(token, secret, algorithms=[settings.AUTH_JWT_ALGORITHM])
+        payload = jwt.decode(
+            token,
+            secret,
+            algorithms=[settings.AUTH_JWT_ALGORITHM],
+            # Expiry is mandatory: a token without exp must be rejected, not treated
+            # as non-expiring. verify_exp is on by default; require makes it mandatory.
+            options={"require": ["exp", "sub"], "verify_exp": True},
+        )
     except jwt.ExpiredSignatureError as exc:
         raise AuthenticationError("Access token has expired") from exc
     except jwt.InvalidTokenError as exc:

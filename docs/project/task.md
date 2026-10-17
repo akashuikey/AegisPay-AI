@@ -386,6 +386,23 @@
   - **Blocker resolved (for the operator model)**: the console is no longer reachable without authentication; the `/conversations/{id}` IDOR surface is gated. The former "no authentication / IDOR" deployment blocker is closed under the operator-shared model.
   - **Remaining future work (not blockers for a private demo)**: per-operator audit attribution, role tiers, token revocation/refresh, `/auth/login` rate limiting, and an external IdP for production multi-tenant use.
   - Zero P2-A3 code initiated.
+- **Security Review Hardening (2026-10-17, commit on top of `777fae8`)**: Focused auth
+  security review found and fixed two defects:
+  1. `decode_access_token` accepted a JWT with no `exp` claim (treated as non-expiring). Now
+     `exp` and `sub` are required (`options={"require": [...]}`); a token missing `exp` is
+     rejected. Verified alg=none, wrong-key, expired, missing/wrong claims, and HS512-vs-HS256
+     algorithm confusion are all rejected.
+  2. Login username-enumeration via timing: the unknown-user fallback used a structurally
+     invalid dummy hash, so `verify_password` short-circuited (~0 ms) versus a real bcrypt
+     verify (~165 ms). Replaced with a real bcrypt hash computed once at import, equalizing
+     work across the account-exists and account-missing paths. Response status/code/message
+     were already identical.
+  Regression tests added (JWT crafted-token suite, dummy-hash structural check, enumeration
+  parity, bootstrap-does-not-reset-password, bootstrap-skips-when-config-missing).
+  - **Still NOT implemented (material for public production, acceptable for private demo)**:
+    no rate limiting / lockout on `/auth/login` (brute-force throttling); HTTPS/TLS is a
+    deployment assumption (bearer tokens require transport encryption); `CORS_ORIGINS` and a
+    strong `AUTH_JWT_SECRET` must be set per environment. Not public-production ready.
 
 #### Task P2-A3: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
 

@@ -6,6 +6,7 @@ signed JWT (Bearer). All operations-console routers depend on
 transaction, risk, investigation, or conversation data.
 """
 
+import secrets
 from typing import Annotated
 from uuid import UUID
 
@@ -16,7 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.core.errors import AuthenticationError
 from app.core.logging import get_logger
-from app.core.security import create_access_token, decode_access_token, verify_password
+from app.core.security import (
+    create_access_token,
+    decode_access_token,
+    hash_password,
+    verify_password,
+)
 from app.db.models import OperatorModel
 from app.db.session import get_db_session
 from app.repositories.operator_repository import OperatorRepository
@@ -25,6 +31,12 @@ from app.schemas.auth import LoginRequest, OperatorResponse, TokenResponse
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+# A real bcrypt hash of a random value, computed once at import. When an unknown
+# username is submitted we still verify the password against this hash so that
+# login performs the same bcrypt work whether or not the account exists,
+# preventing username enumeration via response timing.
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
 
 # auto_error=False so a missing/invalid header surfaces as our structured 401
 # via AuthenticationError rather than FastAPI's default bare 403/401 payload.
@@ -77,12 +89,9 @@ async def login(
 ) -> TokenResponse:
     """Authenticate an operator and return a signed access token."""
     operator = await repository.get_by_username(request.username)
-    # Verify a hash in both branches to avoid leaking account existence via timing.
-    stored_hash = (
-        operator.password_hash
-        if operator is not None
-        else "$2b$12$0000000000000000000000000000000000000000000000000000"
-    )
+    # Verify against a real bcrypt hash in both branches so the request performs
+    # equivalent work whether or not the account exists (no enumeration via timing).
+    stored_hash = operator.password_hash if operator is not None else _DUMMY_PASSWORD_HASH
     password_ok = verify_password(request.password, stored_hash)
 
     if operator is None or not operator.is_active or not password_ok:

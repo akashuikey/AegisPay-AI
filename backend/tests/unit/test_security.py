@@ -2,6 +2,7 @@
 
 import time
 
+import jwt
 import pytest
 
 from app.core.config import Settings
@@ -12,6 +13,8 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+
+_SECRET = "unit-test-secret-padded-well-beyond-sixty-four-bytes-for-hs512-aaaaaaaa"
 
 
 def _settings(**overrides: object) -> Settings:
@@ -69,3 +72,44 @@ def test_token_helpers_fail_closed_without_secret() -> None:
         create_access_token("operator-123", settings)
     with pytest.raises(AuthConfigurationError):
         decode_access_token("any.token.value", settings)
+
+
+def _craft(payload: dict[str, object], *, algorithm: str = "HS256", key: str = _SECRET) -> str:
+    return jwt.encode(payload, key, algorithm=algorithm)
+
+
+def test_decode_rejects_token_without_exp_claim() -> None:
+    """Regression: a token lacking exp must be rejected, not treated as non-expiring."""
+    settings = _settings(AUTH_JWT_SECRET=_SECRET)
+    token = _craft({"sub": "op", "type": "access"})  # no exp
+    with pytest.raises(AuthenticationError):
+        decode_access_token(token, settings)
+
+
+def test_decode_rejects_alg_none_token() -> None:
+    """An unsigned (alg=none) token must never be accepted."""
+    settings = _settings(AUTH_JWT_SECRET=_SECRET)
+    token = jwt.encode(
+        {"sub": "op", "type": "access", "exp": int(time.time()) + 600}, "", algorithm="none"
+    )
+    with pytest.raises(AuthenticationError):
+        decode_access_token(token, settings)
+
+
+def test_decode_rejects_unexpected_algorithm() -> None:
+    """A token signed with an algorithm outside the allowlist is rejected (alg confusion)."""
+    settings = _settings(AUTH_JWT_SECRET=_SECRET, AUTH_JWT_ALGORITHM="HS256")
+    token = _craft(
+        {"sub": "op", "type": "access", "exp": int(time.time()) + 600}, algorithm="HS512"
+    )
+    with pytest.raises(AuthenticationError):
+        decode_access_token(token, settings)
+
+
+def test_decode_rejects_missing_or_wrong_type_claim() -> None:
+    settings = _settings(AUTH_JWT_SECRET=_SECRET)
+    exp = int(time.time()) + 600
+    with pytest.raises(AuthenticationError):
+        decode_access_token(_craft({"type": "access", "exp": exp}), settings)  # no sub
+    with pytest.raises(AuthenticationError):
+        decode_access_token(_craft({"sub": "op", "type": "refresh", "exp": exp}), settings)

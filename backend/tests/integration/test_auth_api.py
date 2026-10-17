@@ -206,3 +206,89 @@ async def test_bootstrap_operator_provisions_and_is_idempotent(
     )
     assert login.status_code == 200
     assert login.json()["operator"]["username"] == "boot_op"
+
+
+def test_login_dummy_hash_is_real_bcrypt_for_timing_equalization() -> None:
+    """Regression: the unknown-user fallback hash must be a real bcrypt hash.
+
+    If it is not a valid bcrypt hash, verify_password short-circuits and the
+    no-such-user path returns far faster than the wrong-password path, leaking
+    account existence via timing. A well-formed bcrypt hash forces equivalent work.
+    """
+    from app.api.auth import _DUMMY_PASSWORD_HASH
+    from app.core.security import verify_password
+
+    assert _DUMMY_PASSWORD_HASH.startswith("$2b$")
+    assert len(_DUMMY_PASSWORD_HASH) == 60
+    # A wrong guess verifies (does real work) and returns False.
+    assert verify_password("any-guess", _DUMMY_PASSWORD_HASH) is False
+
+
+@pytest.mark.asyncio
+async def test_login_unknown_and_wrong_password_are_indistinguishable(
+    unauth_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Unknown user and wrong password return identical status and error code/message."""
+    await _seed_operator(db_session)
+    unknown = await unauth_client.post(
+        "/api/v1/auth/login", json={"username": "no_such_user", "password": "x"}
+    )
+    wrong = await unauth_client.post(
+        "/api/v1/auth/login", json={"username": TEST_USERNAME, "password": "wrong"}
+    )
+    assert unknown.status_code == wrong.status_code == 401
+    assert unknown.json()["error"]["code"] == wrong.json()["error"]["code"] == "UNAUTHENTICATED"
+    assert unknown.json()["error"]["message"] == wrong.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_does_not_reset_existing_operator_password(
+    unauth_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Startup bootstrap must never overwrite an existing operator's password."""
+    from app.services.auth_bootstrap import ensure_bootstrap_operator
+    from tests.conftest import get_test_session_factory
+
+    # Operator already exists with the original password.
+    await _seed_operator(db_session, username="dup_op", password="original-password")
+
+    settings = get_test_settings()
+    object.__setattr__(settings, "AUTH_BOOTSTRAP_OPERATOR_USERNAME", "dup_op")
+    object.__setattr__(settings, "AUTH_BOOTSTRAP_OPERATOR_PASSWORD", "attacker-new-password")
+
+    await ensure_bootstrap_operator(get_test_session_factory(), settings)
+
+    # Original password still works; the bootstrap password does NOT.
+    ok = await unauth_client.post(
+        "/api/v1/auth/login", json={"username": "dup_op", "password": "original-password"}
+    )
+    assert ok.status_code == 200
+    overwritten = await unauth_client.post(
+        "/api/v1/auth/login", json={"username": "dup_op", "password": "attacker-new-password"}
+    )
+    assert overwritten.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_skips_when_config_missing(db_session: AsyncSession) -> None:
+    """With no bootstrap credentials configured, no operator is provisioned."""
+    from sqlalchemy import func, select
+
+    from app.db.models import OperatorModel
+    from app.services.auth_bootstrap import ensure_bootstrap_operator
+    from tests.conftest import get_test_session_factory
+
+    settings = get_test_settings()
+    object.__setattr__(settings, "AUTH_BOOTSTRAP_OPERATOR_USERNAME", None)
+    object.__setattr__(settings, "AUTH_BOOTSTRAP_OPERATOR_PASSWORD", None)
+
+    await ensure_bootstrap_operator(get_test_session_factory(), settings)
+
+    count = (await db_session.execute(select(func.count(OperatorModel.id)))).scalar_one()
+    assert count == 0
+
+    # Partial config (username only) is also treated as "not configured".
+    object.__setattr__(settings, "AUTH_BOOTSTRAP_OPERATOR_USERNAME", "lonely")
+    await ensure_bootstrap_operator(get_test_session_factory(), settings)
+    count2 = (await db_session.execute(select(func.count(OperatorModel.id)))).scalar_one()
+    assert count2 == 0
