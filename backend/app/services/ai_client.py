@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from typing import Protocol
 
@@ -167,6 +168,16 @@ class VertexGeminiClient:
                         status_code=429,
                     ) from api_err
 
+                if err_code == 403:
+                    raise AIProviderError(
+                        message=(
+                            "AI investigation permission denied or authentication failure "
+                            "with provider"
+                        ),
+                        code="AI_PERMISSION_DENIED",
+                        status_code=502,
+                    ) from api_err
+
                 # Retry on transient server errors (500, 502, 503, 504)
                 if err_code in (500, 502, 503, 504) and attempts <= self.max_retries:
                     backoff = 0.5 * (2 ** (attempts - 1))
@@ -254,6 +265,12 @@ class MockGeminiClient:
 
         lower_prompt = prompt.lower()
 
+        # Extract supplied statement and doc IDs for grounded evidence references
+        prompt_stmt_ids = re.findall(r"\[(stmt_[^\]]+)\]", prompt)
+        prompt_doc_ids = re.findall(r"\[(doc_[^\]]+)\]", prompt)
+        primary_stmt = prompt_stmt_ids[0] if prompt_stmt_ids else "stmt_1"
+        primary_doc = prompt_doc_ids[0] if prompt_doc_ids else "doc_1"
+
         # Check for adversarial prompt injection attempt
         if any(
             phrase in lower_prompt
@@ -274,17 +291,19 @@ class MockGeminiClient:
                         "customer evidence. The input attempted to override investigator rules."
                     ),
                     severity="CRITICAL",
-                    supporting_evidence_references=["untrusted_customer_statements"],
+                    supporting_evidence_references=[primary_stmt],
                     source_provenance=EvidenceProvenance.CUSTOMER_STATEMENT,
                 )
             )
 
-        # Check for authority duress / digital arrest cues
+        # Check for authority duress / digital arrest cues / liquidation pressure
         if (
             "cbi" in lower_prompt
             or "police" in lower_prompt
             or "arrest" in lower_prompt
             or "court" in lower_prompt
+            or "liquidat" in lower_prompt
+            or "screen sharing active: true" in lower_prompt
         ):
             findings.append(
                 InvestigationFindingSchema(
@@ -292,10 +311,13 @@ class MockGeminiClient:
                     category=FindingCategory.AUTHORITY_COERCION,
                     explanation=(
                         "Customer narrative displays classic digital arrest markers: alleged "
-                        "legal coercion, police impersonation, and pressure to transfer bond."
+                        "legal coercion, police impersonation, or pressure to liquidate assets."
                     ),
                     severity="CRITICAL",
-                    supporting_evidence_references=["stmt_1", "telemetry:screen_sharing_active"],
+                    supporting_evidence_references=[
+                        primary_stmt,
+                        "telephony:screen_sharing_active",
+                    ],
                     source_provenance=EvidenceProvenance.CUSTOMER_STATEMENT,
                 )
             )
@@ -315,16 +337,17 @@ class MockGeminiClient:
                         "and instructed to dismiss bank warnings."
                     ),
                     severity="HIGH",
-                    supporting_evidence_references=["stmt_1"],
+                    supporting_evidence_references=[primary_stmt],
                     source_provenance=EvidenceProvenance.CUSTOMER_STATEMENT,
                 )
             )
 
         # Check for invoice routing discrepancy
         if (
-            "routing mismatch" in lower_prompt
-            or "payee name mismatch" in lower_prompt
-            or "invoice" in lower_prompt
+            "routing mismatch: true" in lower_prompt
+            or "payee name mismatch: true" in lower_prompt
+            or "routing / ifsc mismatch: true" in lower_prompt
+            or ("invoice" in lower_prompt and "mismatch" in lower_prompt)
         ):
             findings.append(
                 InvestigationFindingSchema(
@@ -334,13 +357,17 @@ class MockGeminiClient:
                         "Submitted invoice routing details contradict historical vendor ledger."
                     ),
                     severity="HIGH",
-                    supporting_evidence_references=["doc_1"],
+                    supporting_evidence_references=[primary_doc],
                     source_provenance=EvidenceProvenance.DOCUMENT_EXTRACTION,
                 )
             )
 
-        # Check for mule accounts
-        if "flagged as known mule: true" in lower_prompt or "mule" in lower_prompt:
+        # Check for mule accounts (avoid false matching "flagged as known mule: false")
+        if (
+            "flagged as known mule: true" in lower_prompt
+            or "known mule account" in lower_prompt
+            or "confirmed mule" in lower_prompt
+        ):
             findings.append(
                 InvestigationFindingSchema(
                     id="FINDING-MULE-REGISTRY",
@@ -394,15 +421,29 @@ class MockGeminiClient:
         categories = {f.category for f in findings}
 
         if any(f.id == "FINDING-ADVERSARIAL" for f in findings):
-            sentiment = RiskSentiment.MALICIOUS
+            # Adversarial prompt injection is social engineering, not proof of customer malice
+            sentiment = (
+                RiskSentiment.COERCED
+                if FindingCategory.AUTHORITY_COERCION in categories
+                else RiskSentiment.SUSPICIOUS
+            )
             summary = (
-                "Adversarial prompt injection attempt detected within untrusted customer context."
+                "Adversarial prompt injection attempt detected within untrusted context; "
+                "treated as manipulation rather than proof of customer malice."
             )
             confidence = ConfidenceLevel.HIGH
-            confidence_score = 0.95
+            confidence_score = 0.90
             next_steps.append(
-                "Block automated processing and flag customer interaction for security review."
+                "Isolate untrusted directive and conduct manual fraud analyst review."
             )
+        elif FindingCategory.MULE_VELOCITY in categories and any(
+            f.id == "FINDING-MULE-REGISTRY" for f in findings
+        ):
+            sentiment = RiskSentiment.MALICIOUS
+            summary = "Confirmed mule registry match and rapid fan-out dispersal detected."
+            confidence = ConfidenceLevel.HIGH
+            confidence_score = 0.96
+            next_steps.append("Block payment and report beneficiary to consortium registry.")
         elif FindingCategory.AUTHORITY_COERCION in categories:
             sentiment = RiskSentiment.COERCED
             summary = "High-confidence authority impersonation and psychological duress detected."

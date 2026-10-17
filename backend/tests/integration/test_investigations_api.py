@@ -11,7 +11,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.investigations import get_default_ai_client
-from app.db.models import TransactionInvestigationModel
+from app.core.errors import AIProviderError
+from app.db.models import TransactionAuditModel, TransactionInvestigationModel
+from app.domain.investigation import (
+    ConfidenceLevel,
+    EvidenceProvenance,
+    FindingCategory,
+    InvestigationModelMetadata,
+    RiskSentiment,
+)
+from app.schemas.investigation import (
+    InvestigationFindingSchema,
+    InvestigationStructuredOutput,
+)
 from app.services.ai_client import MockGeminiClient
 
 
@@ -215,4 +227,192 @@ async def test_investigation_provider_failure_returns_502(client: AsyncClient) -
         assert data["error"]["code"] == "AI_PROVIDER_ERROR"
     finally:
         # Restore default mock client
+        app.dependency_overrides[get_default_ai_client] = lambda: MockGeminiClient()
+
+
+@pytest.mark.asyncio
+async def test_investigation_provider_permission_denied_returns_502(client: AsyncClient) -> None:
+    """Verify HTTP 403 provider permission denied returns HTTP 502 with AI_PERMISSION_DENIED."""
+    tx_res = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_perm_01",
+            "idempotency_key": f"idemp_{uuid.uuid4().hex[:12]}",
+            "amount": "10000.00",
+            "currency": "INR",
+            "payment_rail": "UPI",
+            "recipient_name": "Test Payee",
+            "recipient_identifier": "payee@upi",
+            "purpose": "Test",
+        },
+    )
+    assert tx_res.status_code == 201
+    tx_id = tx_res.json()["id"]
+
+    app = client._transport.app  # type: ignore[attr-defined]
+    perm_denied_client = MockGeminiClient(
+        should_fail=True,
+        failure_exception=AIProviderError(
+            message="AI investigation permission denied or authentication failure with provider",
+            code="AI_PERMISSION_DENIED",
+            status_code=502,
+        ),
+    )
+    app.dependency_overrides[get_default_ai_client] = lambda: perm_denied_client
+
+    try:
+        response = await client.post(
+            "/api/v1/investigations",
+            json={"transaction_id": tx_id},
+        )
+        assert response.status_code == 502
+        data = response.json()
+        assert data["error"]["code"] == "AI_PERMISSION_DENIED"
+    finally:
+        app.dependency_overrides[get_default_ai_client] = lambda: MockGeminiClient()
+
+
+@pytest.mark.asyncio
+async def test_investigation_failure_preserves_transaction_state_and_audit(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """CRITICAL ISOLATION TEST:
+    Verify that an AI investigation failure leaves transaction state, version,
+    and audit log entries completely unchanged.
+    """
+    # 1. Create a transaction
+    tx_res = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_iso_01",
+            "idempotency_key": f"idemp_{uuid.uuid4().hex[:12]}",
+            "amount": "80000.00",
+            "currency": "INR",
+            "payment_rail": "IMPS",
+            "recipient_name": "Test Beneficiary",
+            "recipient_identifier": "beneficiary@upi",
+            "purpose": "Rent",
+        },
+    )
+    assert tx_res.status_code == 201
+    tx_id = tx_res.json()["id"]
+
+    # 2. Query initial audit count and transaction snapshot
+    tx_before = (await client.get(f"/api/v1/transactions/{tx_id}")).json()
+    audit_stmt = select(TransactionAuditModel).where(
+        TransactionAuditModel.transaction_id == uuid.UUID(tx_id)
+    )
+    audits_before = (await db_session.execute(audit_stmt)).scalars().all()
+    audit_count_before = len(audits_before)
+
+    # 3. Inject failing AI client
+    app = client._transport.app  # type: ignore[attr-defined]
+    failing_client = MockGeminiClient(should_fail=True)
+    app.dependency_overrides[get_default_ai_client] = lambda: failing_client
+
+    try:
+        response = await client.post(
+            "/api/v1/investigations",
+            json={"transaction_id": tx_id},
+        )
+        assert response.status_code == 502
+    finally:
+        app.dependency_overrides[get_default_ai_client] = lambda: MockGeminiClient()
+
+    # 4. Invariant: Transaction state, version, and audits are strictly unchanged
+    tx_after = (await client.get(f"/api/v1/transactions/{tx_id}")).json()
+    assert tx_after["state"] == tx_before["state"]
+    assert tx_after["version"] == tx_before["version"]
+
+    audits_after = (await db_session.execute(audit_stmt)).scalars().all()
+    assert len(audits_after) == audit_count_before
+
+
+@pytest.mark.asyncio
+async def test_investigation_evidence_integrity_end_to_end(client: AsyncClient) -> None:
+    """Verify end-to-end that fabricated evidence references are scrubbed and tracked."""
+    tx_res = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_integ_e2e_01",
+            "idempotency_key": f"idemp_{uuid.uuid4().hex[:12]}",
+            "amount": "45000.00",
+            "currency": "INR",
+            "payment_rail": "UPI",
+            "recipient_name": "Tech Corp",
+            "recipient_identifier": "tech@upi",
+            "purpose": "Hardware invoice",
+        },
+    )
+    assert tx_res.status_code == 201
+    tx_id = tx_res.json()["id"]
+
+    # Mock client that produces a mix of valid and fabricated evidence references
+    class HallucinatingAIClient:
+        async def generate_investigation(
+            self, prompt: str, system_instruction: str, correlation_id: str | None = None
+        ) -> tuple[InvestigationStructuredOutput, InvestigationModelMetadata]:
+            output = InvestigationStructuredOutput(
+                summary="Analysis with fabricated citations.",
+                overall_risk_sentiment=RiskSentiment.SUSPICIOUS,
+                confidence=ConfidenceLevel.MEDIUM,
+                confidence_score=0.72,
+                findings=[
+                    InvestigationFindingSchema(
+                        id="FINDING-CITATIONS",
+                        category=FindingCategory.BENEFICIARY_INCONSISTENCY,
+                        explanation="Inconsistent invoice details noted.",
+                        severity="MEDIUM",
+                        supporting_evidence_references=[
+                            "stmt_legit_01",
+                            "stmt_hallucinated_888",
+                            "doc_unsupplied_fbi",
+                        ],
+                        source_provenance=EvidenceProvenance.CUSTOMER_STATEMENT,
+                    )
+                ],
+                contradictory_or_mitigating_evidence=[],
+                missing_information=[],
+                unresolved_questions=[],
+                suggested_next_steps=[],
+            )
+            metadata = InvestigationModelMetadata(
+                provider="mock_gemini",
+                model_id="gemini-2.5-flash",
+                latency_ms=12.0,
+                correlation_id=correlation_id,
+            )
+            return output, metadata
+
+    app = client._transport.app  # type: ignore[attr-defined]
+    app.dependency_overrides[get_default_ai_client] = lambda: HallucinatingAIClient()
+
+    try:
+        response = await client.post(
+            "/api/v1/investigations",
+            json={
+                "transaction_id": tx_id,
+                "customer_statements": [
+                    {
+                        "statement_id": "stmt_legit_01",
+                        "question": "Is this invoice valid?",
+                        "answer": "Yes, I verified the bank details.",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 201
+        data = response.json()
+
+        finding = data["findings"][0]
+        # Valid reference retained
+        assert "stmt_legit_01" in finding["supporting_evidence_references"]
+        # Fabricated references scrubbed
+        assert "stmt_hallucinated_888" not in finding["supporting_evidence_references"]
+        assert "doc_unsupplied_fbi" not in finding["supporting_evidence_references"]
+
+        # Missing information captures the rejection
+        assert any("stmt_hallucinated_888" in msg for msg in data["missing_information"])
+        assert any("doc_unsupplied_fbi" in msg for msg in data["missing_information"])
+    finally:
         app.dependency_overrides[get_default_ai_client] = lambda: MockGeminiClient()

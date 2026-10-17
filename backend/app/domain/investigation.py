@@ -45,6 +45,7 @@ class EvidenceProvenance(StrEnum):
     CONSORTIUM_REGISTRY = "consortium_registry"
     RISK_ENGINE = "risk_engine"
     HISTORICAL_LEDGER = "historical_ledger"
+    MODEL_INFERENCE = "model_inference"
 
 
 @dataclass(frozen=True)

@@ -30,7 +30,9 @@ export type EvidenceProvenance =
   | 'device_telephony'
   | 'consortium_registry'
   | 'risk_engine'
-  | 'historical_ledger';
+  | 'historical_ledger'
+  | 'model_inference';
+
 
 export interface CustomerStatementEvidence {
   statement_id: string;
@@ -169,3 +171,4 @@ export async function fetchInvestigationsForTransactionApi(
 
   return (await response.json()) as InvestigationListResponse;
 }
+

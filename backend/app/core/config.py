@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     ]
 
     # Gemini & Google Cloud Vertex AI Configuration
+    AI_PROVIDER: str = "auto"
     GEMINI_MODEL_ID: str = "gemini-2.5-flash"
     GCP_PROJECT_ID: str | None = None
     GCP_LOCATION: str = "us-central1"

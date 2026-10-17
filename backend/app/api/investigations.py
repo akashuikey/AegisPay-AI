@@ -32,10 +32,27 @@ router = APIRouter(prefix="/investigations", tags=["AI Investigation"])
 
 @lru_cache
 def get_default_ai_client() -> AIInvestigationClient:
-    """Provide singleton Google Cloud Vertex AI Gemini client."""
+    """Provide AI investigation client based on environment configuration.
+
+    Provider Selection:
+    - 'mock': Offline synthetic client for test and demonstration.
+    - 'auto', 'vertex_ai', 'gemini_api': Official Google GenAI client, requiring
+      either GCP_PROJECT_ID or GEMINI_API_KEY.
+    """
+    from app.core.errors import AIConfigurationError
+    from app.services.ai_client import MockGeminiClient
 
     settings = Settings()
-    return VertexGeminiClient(settings)
+    provider = settings.AI_PROVIDER.lower().strip()
+    if provider == "mock":
+        return MockGeminiClient()
+    if provider in ("auto", "vertex_ai", "gemini_api", "vertex"):
+        return VertexGeminiClient(settings)
+
+    raise AIConfigurationError(
+        f"Unknown AI_PROVIDER '{settings.AI_PROVIDER}'. "
+        "Valid options are: 'auto', 'vertex_ai', 'gemini_api', or 'mock'."
+    )
 
 
 def get_investigation_service(

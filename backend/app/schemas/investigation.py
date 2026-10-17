@@ -76,11 +76,15 @@ class InvestigateTransactionRequest(BaseModel):
     assessment_id: UUID | None = Field(
         default=None, description="Optional specific deterministic assessment ID"
     )
-    customer_statements: list[CustomerStatementEvidence] = Field(default_factory=list)
-    document_extractions: list[DocumentExtractionEvidence] = Field(default_factory=list)
+    customer_statements: list[CustomerStatementEvidence] = Field(
+        default_factory=list, max_length=50
+    )
+    document_extractions: list[DocumentExtractionEvidence] = Field(
+        default_factory=list, max_length=20
+    )
     telephony_telemetry: TelephonyTelemetryEvidence | None = None
     recipient_intelligence: RecipientIntelligenceEvidence | None = None
-    coercion_cues: list[str] = Field(default_factory=list)
+    coercion_cues: list[str] = Field(default_factory=list, max_length=20)
     correlation_id: str | None = Field(default=None, max_length=64)
 
 

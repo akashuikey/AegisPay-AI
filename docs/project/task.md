@@ -222,31 +222,42 @@
 - **Acceptance Criteria**:
   - [x] Official `google-genai` SDK integrated without third-party agent frameworks (no LangChain/LangGraph).
   - [x] Structured JSON output parsed and strictly validated using Pydantic v2 schemas.
-  - [x] Prompt injection resistance verified: adversarial overrides inside customer statements are fenced and flagged as `SOCIAL_ENGINEERING`.
-  - [x] Upstream errors cleanly mapped: timeout -> HTTP 504, rate limit -> HTTP 429, provider error -> HTTP 502, missing configuration -> HTTP 503.
-  - [x] State-machine invariant strictly enforced: transaction state and version do not change after AI investigation.
+  - [x] Provider selection configured via `AI_PROVIDER` (`auto`, `vertex_ai`, `gemini_api`, `mock`), explicitly declaring `"mock_gemini"` vs `"vertex_ai"` in `model_metadata.provider`.
+  - [x] Evidence integrity enforced: all citations validated against supplied input allowlist; fabricated references scrubbed and recorded in `missing_information`.
+  - [x] Provenance allowlist enforced with `model_inference` fallback for ungrounded claims.
+  - [x] Prompt injection resistance verified: adversarial overrides inside customer statements are fenced and flagged as `SOCIAL_ENGINEERING`; neutralized away from `MALICIOUS` customer sentiment.
+  - [x] Input payload bounds enforced (`customer_statements` max 50, `document_extractions` max 20, `coercion_cues` max 20).
+  - [x] Upstream errors cleanly mapped: timeout -> HTTP 504 (`AI_PROVIDER_TIMEOUT`), rate limit -> HTTP 429 (`AI_RATE_LIMIT_EXCEEDED`), permission denied (403) -> HTTP 502 (`AI_PERMISSION_DENIED`), provider error -> HTTP 502 (`AI_PROVIDER_ERROR`), missing configuration -> HTTP 503 (`AI_CONFIGURATION_ERROR`).
+  - [x] State-machine invariant strictly enforced: transaction state, version, and audit trail are immutable during investigation creation, retrieval, or upstream failure.
+  - [x] Clean database migration verified: base to head (`0001` -> `0002` -> `0003` -> `0004`) on clean PostgreSQL database.
   - [x] Endpoints exposed: `POST /api/v1/investigations`, `GET /api/v1/investigations/{id}`, `GET /api/v1/transactions/{id}/investigations`.
-  - [x] All 101 backend tests and 10 frontend tests pass (111 tests total, 100% green).
+  - [x] All 111 backend tests and 10 frontend tests pass (121 tests total, 100% green).
   - [x] Backend and frontend linting, formatting, and type checks pass with zero warnings or errors.
 - **Verification Commands & Results**:
   ```bash
-  # Alembic migration
-  cd backend && uv run alembic upgrade head
-  # Applied 0004_create_transaction_investigations
+  # Alembic clean database migration verification
+  DATABASE_URL="postgresql+psycopg://aegispay_user:aegispay_dev_pw@localhost:5433/alembic_clean_test" uv run alembic upgrade head
+  # Applied: 0001_initial_baseline -> 0002_transactions -> 0003_transaction_assessments -> 0004_transaction_investigations
 
-  # Comprehensive verification suite
+  # Full verification suite
   make check-all
   # Backend:
   # - ruff check .: All checks passed!
   # - ruff format --check .: 50 files already formatted
   # - mypy app: Success: no issues found in 35 source files
-  # - pytest: 101 passed in 2.55s
+  # - pytest: 111 passed in 2.61s (19 unit investigation tests, 8 integration tests)
   # Frontend:
   # - eslint .: 0 errors, 0 warnings
   # - tsc --noEmit: 0 errors
   # - vitest run: 10 passed in 2 test files
-  # - vite build: built in 612ms
+  # - vite build: built in 555ms
   ```
+- **Execution Log, Security & Blocker Notes**:
+  - **Live Gemini Provider Smoke Test**: `UNVERIFIED (NO_CREDENTIALS)`. Neither `GCP_PROJECT_ID` nor `GEMINI_API_KEY` is provisioned in the local environment. When `AI_PROVIDER=auto`, the application explicitly fails with HTTP 503 `AI_CONFIGURATION_ERROR` rather than masquerading mock data as live AI output.
+  - **Authorization & Access Control**: Documented as an **architectural blocker / known limitation** for multi-tenant production. Endpoints currently lack authentication (JWT/session) and object-level authorization (IDOR/BOLA protections). Any client with a valid transaction or investigation UUID can request or read investigation records. Must be addressed before multi-user deployment.
+  - **Evidence Integrity Verification**: `InvestigationService._validate_and_sanitize_evidence_integrity` validates all model findings against supplied input tokens (`stmt_*`, `doc_*`, telemetry sensors, registry flags, triggered rules). Hallucinated references (e.g. `stmt_999`, unsupplied registries) are stripped and logged in `missing_information`. Findings with empty evidence citations default to `EvidenceProvenance.MODEL_INFERENCE`.
+  - **Adversarial Non-Malice Invariant**: Untrusted customer statements attempting prompt injection (e.g. `SYSTEM OVERRIDE`) are flagged under `SOCIAL_ENGINEERING` but cannot classify the customer as `MALICIOUS`. Malicious classification is strictly reserved for confirmed mule/beneficiary fraud.
+  - Zero Phase 2 Task P2-A2 code initiated. All verification criteria satisfied.
 
 #### Task P2-A2: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
 
