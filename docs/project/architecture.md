@@ -63,9 +63,33 @@ graph TD
 - `backend/app/db/session.py`: Asynchronous engine creation, connection pooling (`pool_size`, `max_overflow`), session factory (`async_sessionmaker`), and health check query routine.
 - `backend/app/api/health.py`: Liveness (`/health/live`) and database readiness (`/health/ready`) endpoints.
 - `backend/app/api/router.py`: Root versioned API router (`/api/v1`).
-- `backend/app/domain/`: (Planned for P1-A2) Transaction entity, FSM states, risk evaluation models.
-- `backend/app/repositories/`: (Planned for P1-A2) Database query execution and entity persistence.
-- `backend/app/services/`: (Planned for P1-A2) Application orchestration.
+- `backend/app/domain/`: Pure transaction domain entity, 10-state workflow finite state machine, and state transition policy validation rules.
+- `backend/app/repositories/`: Data access layer for transaction persistence, idempotency lookups, and audit history.
+- `backend/app/services/`: Application service orchestrating atomic transaction creation, transition validation, and audit recording.
+
+### Transaction Lifecycle & State Machine (10 States)
+The transaction workflow finite state machine manages simulated payment progression across 10 workflow states:
+1. `INITIATED`: Transaction received and staged.
+2. `ASSESSING`: Fast initial telemetry ingestion.
+3. `RISK_ASSESSED`: Deterministic checks and scores computed.
+4. `DECISION_READY`: Risk and compliance evaluation synthesized.
+5. `VERIFICATION_REQUIRED`: Escalation to customer inquiry initiated.
+6. `HELD_FOR_VERIFICATION`: Simulated payment pre-settlement hold active.
+7. `INVESTIGATING`: Active conversational / contextual investigation in progress.
+8. `HUMAN_REVIEW`: Escalated to fraud operations analyst.
+9. `SETTLED_SIMULATED`: Terminal state; simulated funds released.
+10. `CANCELLED_SIMULATED`: Terminal state; simulated transfer aborted without fund movement.
+
+Allowed Transition Matrix:
+- `INITIATED` -> `ASSESSING`, `CANCELLED_SIMULATED`
+- `ASSESSING` -> `RISK_ASSESSED`, `HUMAN_REVIEW`
+- `RISK_ASSESSED` -> `DECISION_READY`, `HUMAN_REVIEW`
+- `DECISION_READY` -> `VERIFICATION_REQUIRED`, `HELD_FOR_VERIFICATION`, `SETTLED_SIMULATED`, `CANCELLED_SIMULATED`, `HUMAN_REVIEW`
+- `VERIFICATION_REQUIRED` -> `INVESTIGATING`, `CANCELLED_SIMULATED`
+- `HELD_FOR_VERIFICATION` -> `INVESTIGATING`, `CANCELLED_SIMULATED`
+- `INVESTIGATING` -> `DECISION_READY`, `HUMAN_REVIEW`, `CANCELLED_SIMULATED`
+- `HUMAN_REVIEW` -> `DECISION_READY`, `HELD_FOR_VERIFICATION`, `CANCELLED_SIMULATED`
+- `SETTLED_SIMULATED` & `CANCELLED_SIMULATED`: Terminal states; no further transitions.
 
 ### Frontend Layout & Preserved Prototype UI
 - `frontend/src/App.tsx`: Preserved interactive console layout matching the provided screenshot (`Aster Bank` / Live payment console). Includes the 6-metric summary strip, bank-wide payment queue with sorting/filtering, inspection drawer, scenario controls, and the interactive Android preview mobile phone simulator.

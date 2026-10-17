@@ -7,3 +7,6 @@ class Base(DeclarativeBase):
     """Base class for all SQLAlchemy declarative models."""
 
     pass
+
+
+__all__ = ["Base"]

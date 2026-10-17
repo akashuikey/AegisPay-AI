@@ -1,1 +1,5 @@
-"""Application and workflow orchestration services (implemented in future phases)."""
+"""Application business services."""
+
+from app.services.transaction_service import TransactionService
+
+__all__ = ["TransactionService"]

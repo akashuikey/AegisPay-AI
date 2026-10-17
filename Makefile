@@ -1,3 +1,5 @@
+export PATH := $(HOME)/.local/bin:$(PATH)
+
 .PHONY: help setup db-up db-down db-logs backend-install backend-migrate backend-dev backend-test backend-lint backend-format backend-typecheck frontend-install frontend-dev frontend-test frontend-lint frontend-typecheck frontend-build check-all
 
 help:

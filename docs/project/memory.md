@@ -40,36 +40,27 @@
 
 ## 3. Current Milestone & Status
 
-- **Current Milestone**: Phase 1 — Repository Foundation & Transaction Domain Core.
-- **Current Task**: P1-A1 — AegisPay AI Repository Foundation (`DONE`).
-- **Completed Work**:
-  - Established root monorepo architecture with clean layer separation (`backend/`, `frontend/`, `docs/`, `compose.yaml`, `Makefile`).
-  - Verified Python 3.14.7 compatibility across FastAPI, Pydantic v2, SQLAlchemy 2, psycopg 3, Alembic, Ruff, mypy, and Pytest.
-  - Implemented typed settings (`app/core/config.py`), structured logging (`app/core/logging.py`), and safe error handling (`app/core/errors.py`).
-  - Configured async SQLAlchemy session factory, connection pooling, and Alembic migrations (`0001_initial_baseline`).
-  - Implemented and verified `/health/live` (process liveness) and `/health/ready` (database dependency readiness).
-  - Preserved the existing prototype UI (`artifacts/intent-check`), integrating the Aster Bank live payment console, payment queue, and interactive customer mobile simulator into `frontend/src/App.tsx`.
-  - Added live `BackendHealthBadge` connecting the frontend to the FastAPI health API.
-  - Configured Docker Compose for PostgreSQL 16 Alpine with health check.
-  - Configured GitHub Actions CI workflow (`.github/workflows/ci.yml`).
-  - Verified 100% passing tests (12 backend, 7 frontend), 0 lint/format issues, and successful production build.
-  - Initialized all mandatory project governance files (`docs/project/`).
+- **Current Milestone**: Phase 1 — Repository Foundation & Transaction Domain Core (`DONE`).
+- **Completed Tasks**:
+  - **P1-A1**: Repository foundation, FastAPI backend, Aster Bank frontend prototype preservation, PostgreSQL Docker Compose, Alembic baseline, and health probes.
+  - **P1-A2**: 10-state transaction workflow state machine (`INITIATED`, `ASSESSING`, `RISK_ASSESSED`, `DECISION_READY`, `VERIFICATION_REQUIRED`, `HELD_FOR_VERIFICATION`, `INVESTIGATING`, `HUMAN_REVIEW`, `SETTLED_SIMULATED`, `CANCELLED_SIMULATED`), SQLAlchemy models (`TransactionModel`, `TransactionAuditModel`), Alembic migration `0002_create_transactions_and_audits`, transaction repository with optimistic concurrency locking and customer-scoped idempotency, transaction service, Pydantic v2 schemas, REST endpoints (`/api/v1/transactions`), 63 pytest unit/integration tests, and full test isolation on `test_aegispay`.
+- **Next Milestone**: Phase 2 — Simulation Ingestion & Deterministic Risk Engine.
+  - Next task: **P2-A1**: Simulated Payment Ingestion API & Recipient Intelligence Registry.
 
 ---
 
-## 4. Proposals & Unresolved Questions
+## 4. Confirmed Decisions & Architectural Patterns
 
-- *None. All P1-A1 requirements and acceptance criteria have been satisfied.*
+- **State Machine Architecture**: Authoritative 10-state workflow lifecycle implemented in `app.domain.state_machine`. Pure domain logic with `validate_transition`, `can_transition`, and `is_terminal`. Raises `InvalidStateTransitionError` (HTTP 400).
+- **Idempotency Strategy**: Scoped per `(customer_id, idempotency_key)` backed by PostgreSQL unique constraint. Canonical SHA-256 payload hash is recorded. Re-execution with exact payload returns HTTP 200 OK; re-execution with conflicting payload returns HTTP 409 Conflict (`IdempotencyConflictError`).
+- **Concurrency Control**: Optimistic version locking via integer `version` incremented on each state change. Raises `ConcurrencyConflictError` (HTTP 409) if version is stale.
+- **Audit Integrity**: Append-only `transaction_audits` recorded atomically in the same database transaction as transaction creation and updates.
+- **Testing Strategy**: Isolated test database `test_aegispay` on PostgreSQL container with automatic table teardown and truncation per test run.
 
 ---
 
-## 5. Next Immediate Actions (Recommended for Phase 1, Agent 2)
+## 5. Next Immediate Actions (Phase 2 Initiation)
 
-- **Assigned Task**: Task P1-A2 — Transaction Domain Models & State Machine.
-- **Scope**:
-  1. Define the Transaction domain entity and auditable 7-state finite state machine (`PENDING_EVALUATION`, `EVALUATING`, `APPROVED`, `FLAGGED`, `IN_INVESTIGATION`, `BLOCKED`, `SETTLED`).
-  2. Implement transition validation rules and state machine history ledger.
-  3. Map SQLAlchemy models and generate versioned Alembic migration `0002_create_transactions_table.py`.
-  4. Implement repository layer for atomic state transitions.
-  5. Add unit and integration tests for all valid/invalid state transitions.
-- *Note: Agent 1 stops here. Do not begin Agent 2 automatically.*
+1. Review requirements for Task P2-A1 (Simulated Payment Ingestion API & Recipient Intelligence Registry).
+2. Design recipient intelligence models (reputation, account age, scam report count, risk flags).
+3. Implement ingestion schemas and recipient validation pipelines.

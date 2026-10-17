@@ -88,6 +88,55 @@ class ConflictError(AppException):
         )
 
 
+class InvalidStateTransitionError(AppException):
+    """Raised when an attempted state transition is invalid according to the state machine."""
+
+    def __init__(
+        self,
+        from_state: str,
+        to_state: str,
+        message: str | None = None,
+        details: Any | None = None,
+    ) -> None:
+        msg = message or f"Transition from '{from_state}' to '{to_state}' is not permitted"
+        super().__init__(
+            message=msg,
+            code="INVALID_STATE_TRANSITION",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            details=details or {"from_state": from_state, "to_state": to_state},
+        )
+
+
+class IdempotencyConflictError(ConflictError):
+    """Raised when an idempotency key is reused with mismatched payload."""
+
+    def __init__(
+        self,
+        message: str = "Idempotency key reused with mismatched request payload",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            details=details,
+        )
+        self.code = "IDEMPOTENCY_CONFLICT"
+
+
+class ConcurrencyConflictError(ConflictError):
+    """Raised when a concurrent update modifies a resource (optimistic locking failure)."""
+
+    def __init__(
+        self,
+        message: str = "Resource was modified by another operation; please retry",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            details=details,
+        )
+        self.code = "CONCURRENCY_CONFLICT"
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Register custom exception handlers on the FastAPI application."""
 

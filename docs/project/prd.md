@@ -94,7 +94,7 @@ AegisPay AI is demonstrated across six distinct, simulated real-world fraud and 
 - Comprehensive persistent project governance documentation (`docs/project/`).
 
 ### Future Planned Capabilities (Phases 2–5)
-- **Domain Entities & State Machine**: Transaction state machine (`PENDING_EVALUATION`, `EVALUATING`, `APPROVED`, `FLAGGED`, `IN_INVESTIGATION`, `BLOCKED`, `SETTLED`).
+- **Domain Entities & State Machine**: Auditable 10-state transaction workflow finite state machine: `INITIATED`, `ASSESSING`, `RISK_ASSESSED`, `DECISION_READY`, `VERIFICATION_REQUIRED`, `HELD_FOR_VERIFICATION`, `INVESTIGATING`, `HUMAN_REVIEW`, `SETTLED_SIMULATED`, `CANCELLED_SIMULATED`. These represent transactional workflow states, separated from risk scoring and decision recommendation policies.
 - **Deterministic Risk Engine**: Rule engine evaluating velocity, payee risk scores, account age, and anomaly indicators.
 - **Gemini Investigation Agent**: Multi-modal reasoning over voice dialogues and submitted document images/PDFs.
 - **Customer Simulation Portal**: Interactive payment creation, challenge response, and simulated customer workflows.

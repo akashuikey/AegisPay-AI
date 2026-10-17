@@ -4,7 +4,7 @@
 
 | Phase | Description | Status |
 | :--- | :--- | :--- |
-| **Phase 1** | **Repository Foundation & Transaction Domain Core** | `IN_PROGRESS` |
+| **Phase 1** | **Repository Foundation & Transaction Domain Core** | `DONE` |
 | **Phase 2** | **Simulation Ingestion & Deterministic Risk Engine** | `NOT_STARTED` |
 | **Phase 3** | **Gemini AI Investigation & Voice Experience** | `NOT_STARTED` |
 | **Phase 4** | **Customer Portal & Operations Console (Frontend)** | `NOT_STARTED` |
@@ -69,12 +69,39 @@
 
 ---
 
-#### Task P1-A2: Transaction Domain Models & State Machine (Planned Next)
-- **Owner / Agent**: Agent 2
-- **Status**: `NOT_STARTED`
-- **Objective**: Implement the core transaction domain entity, auditable transaction state machine (`PENDING_EVALUATION`, `EVALUATING`, `APPROVED`, `FLAGGED`, `IN_INVESTIGATION`, `BLOCKED`, `SETTLED`), transition validation rules, SQLAlchemy ORM mappings, Alembic migration for transaction tables, repository persistence layer, and unit tests for state transitions.
+#### Task P1-A2: Transaction Domain Models & State Machine
+- **Owner / Agent**: Senior Software Architect / Backend Engineer (Agent 2)
+- **Status**: `DONE`
+- **Objective**: Implement the transaction domain entity, auditable 10-state workflow finite state machine (`INITIATED`, `ASSESSING`, `RISK_ASSESSED`, `DECISION_READY`, `VERIFICATION_REQUIRED`, `HELD_FOR_VERIFICATION`, `INVESTIGATING`, `HUMAN_REVIEW`, `SETTLED_SIMULATED`, `CANCELLED_SIMULATED`), transition validation rules, SQLAlchemy transaction and audit models, Alembic migration, repository persistence with customer-scoped idempotency and optimistic locking, transaction application service, API request/response schemas, and thin endpoints at `/api/v1/transactions` with unit, database integration, and API tests.
 - **Dependencies**: Task P1-A1 completion.
-- **Note**: Do not begin Agent 2 work automatically.
+- **Acceptance Criteria**:
+  - [x] 10-state transaction lifecycle defined and enforced with domain policy.
+  - [x] Decimal-safe monetary arithmetic, customer ID, idempotency key, currency, rail, recipient details.
+  - [x] Append-only transaction state transition audit model (`transaction_audits`).
+  - [x] SQLAlchemy 2.x async models with indices, unique constraints, and optimistic versioning.
+  - [x] Versioned Alembic migration `0002_create_transactions_and_audits.py` created and applied.
+  - [x] Repository with customer-scoped idempotency and payload conflict detection.
+  - [x] Thin FastAPI endpoints: create, retrieve, bounded list, transition, audit history.
+  - [x] Comprehensive unit tests (transitions, invariants, terminal states).
+  - [x] Database integration tests with isolated PostgreSQL transactions.
+  - [x] API tests covering 201/200 idempotent replay, 404, 409 conflict, and 400 invalid transitions.
+  - [x] All linting (Ruff), type checking (mypy), and test suites pass.
+  - [x] Existing frontend builds and passes all tests.
+- **Verification Commands & Results**:
+  ```bash
+  cd backend
+  uv run alembic upgrade head                # Applied 0002_transactions
+  uv run pytest                              # 63 passed in 0.99s
+  uv run ruff check .                        # All checks passed!
+  uv run ruff format --check .               # 33 files already formatted
+  uv run mypy app                            # Success: no issues found in 22 source files
+  make check-all                             # All backend and frontend checks passed
+  ```
+- **Execution Log & Blocker Notes**:
+  - Authoritative 10-state lifecycle implemented in `app.domain.state_machine` with `validate_transition()`, `can_transition()`, and `is_terminal()`.
+  - Concurrency protected via `(customer_id, idempotency_key)` uniqueness and integer optimistic version locking.
+  - Created isolated PostgreSQL `test_aegispay` database for integration tests.
+  - All 63 backend tests passed; all frontend unit tests (7 passed) and production build passed without regression. Blockers: None.
 
 ---
 

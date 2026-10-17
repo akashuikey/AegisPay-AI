@@ -153,3 +153,4 @@ export const BackendHealthBadge: React.FC = () => {
     </div>
   );
 };
+
