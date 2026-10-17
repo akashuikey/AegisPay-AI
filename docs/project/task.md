@@ -582,6 +582,62 @@
   - **Dev-Only Secret Exposure**: Plaintext OTP is exposed strictly via `dev_otp` when `VERIFICATION_EXPOSE_DEV_OTP=True` for simulated prototyping. In production configuration, `dev_otp` is `None`.
   - Zero P2-A3b voice duress code initiated. All acceptance criteria satisfied.
 
+#### Task P2-A5.1: Verification Security & Concurrency Hardening
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer
+- **Status**: `DONE`
+- **Objective**: Remediate findings SEC-01 through SEC-06 identified in the P2-A5 security audit without altering existing business logic or fraud prevention guardrails. Fix ORM session expiration crashes, eliminate the verification-to-decision race condition gap, enforce single pending challenge per transaction via PostgreSQL partial unique index, validate transaction state pre-conditions and handle partial failures, separate HMAC secret keying with dual-key rotation fallback, and bound challenge creation abuse with database-backed window rate limiting.
+- **Deliverables**:
+  1. `backend/app/core/config.py` & `.env.example`: added `VERIFICATION_HMAC_SECRET: str | None = None`, `VERIFICATION_MAX_CHALLENGES_PER_WINDOW: int = 5`, and `VERIFICATION_CHALLENGE_WINDOW_SECONDS: int = 3600`.
+  2. `backend/app/core/security.py`: added `get_verification_hmac_secret`, updated `hash_otp` with explicit secret support, and implemented dual-key verification fallback in `verify_otp` to support seamless zero-downtime key rotation for in-flight challenges.
+  3. `backend/app/db/models.py`: declared PostgreSQL partial unique index `uq_verification_challenges_pending_tx` on `verification_challenges(transaction_id)` with `postgresql_where=text("status = 'PENDING'")`.
+  4. Alembic migration `0009_enforce_single_pending_challenge.py`: safe forward and rollback migration that deduplicates existing duplicate pending challenges into `SUPERSEDED` status preserving audit records, then creates the partial unique index. Verified on clean DB and existing dev DB.
+  5. `backend/app/repositories/transaction_repository.py`:
+     - Handled `IntegrityError` in `create_challenge` with explicit rollback and re-raise.
+     - Added `count_recent_challenges_for_transaction` to support database-backed creation rate limiting.
+     - Removed premature `session.rollback()` in `update_challenge_fields` when `rowcount == 0` to preserve session identity map.
+  6. `backend/app/services/verification_service.py`:
+     - **SEC-01**: Eliminated `MissingGreenlet` crashes by caching scalar attributes (`cid`, `customer_id`, `version`, `attempt_count`) prior to potential rollbacks or state updates, and re-querying freshly with awaited repository calls.
+     - **SEC-02**: Eliminated concurrency race window between `VERIFIED` and `CONSUMED` by introducing bounded in-flight polling (up to 3.0s at 100ms intervals) for both submission and lock contention; added 3-attempt optimistic lock retry loop in `_handle_correct` for racing attempt increments. Never reports success before decision persistence.
+     - **SEC-03**: Handled concurrent challenge creation races gracefully by catching `IntegrityError` and returning the winning pending challenge.
+     - **SEC-04**: Validated `tx.state == VERIFICATION_REQUIRED` prior to challenge submission, rejecting terminal states (`TRANSACTION_TERMINAL`, 409) and non-required states (`VERIFICATION_NOT_REQUIRED`, 409); implemented partial failure recovery in `_handle_correct` to set `status="FAILED"`, `failure_reason="RESOLUTION_FAILED"` if workflow resolution fails.
+     - **SEC-05**: Applied dedicated `VERIFICATION_HMAC_SECRET` with dual-key rotation.
+     - **SEC-06**: Enforced database-backed rate limiting (429 `RATE_LIMIT_EXCEEDED`) on challenge creation.
+  7. `backend/tests/integration/test_verification_api.py`: Added 7 integration tests covering SEC-01 through SEC-06 (22 tests in file; 200 total backend tests, 100% passing).
+  8. Documentation: Updated `docs/decisions/ADR-004-customer-verification-lifecycle.md` and `docs/project/memory.md`.
+- **Acceptance Criteria**:
+  - [x] Concurrent verification submissions never crash with `MissingGreenlet` (SEC-01).
+  - [x] Concurrent correct submissions resolve safely and never claim success before decision persistence (SEC-02).
+  - [x] Partial unique index enforces single pending challenge per transaction; concurrent creations resolve cleanly (SEC-03).
+  - [x] Submissions on terminal transactions reject with `TRANSACTION_TERMINAL`; partial failures do not strand `VERIFIED` challenges (SEC-04).
+  - [x] Dedicated `VERIFICATION_HMAC_SECRET` is decoupled from JWT secret with dual-key rotation support (SEC-05).
+  - [x] Challenge creation rate limit bounds repeated creation abuse with HTTP 429 (SEC-06).
+  - [x] All 200 backend tests and 39 frontend tests pass (239 total tests, 100% green).
+  - [x] Quality gates (`make check-all`: ruff check, ruff format, mypy, pytest, eslint, tsc, vitest, vite build) pass with 0 errors.
+- **Verification Commands & Results**:
+  ```bash
+  # Clean database migration verification (upgrade -> downgrade -1 -> re-upgrade)
+  POSTGRES_DB=p2a5_clean_test uv run alembic upgrade head
+  POSTGRES_DB=p2a5_clean_test uv run alembic downgrade -1
+  POSTGRES_DB=p2a5_clean_test uv run alembic upgrade head
+
+  # Full verification suite
+  POSTGRES_PORT=5433 make check-all
+  # Backend:
+  # - ruff check .: All checks passed!
+  # - ruff format --check .: 72 files already formatted
+  # - mypy app: Success: no issues found in 52 source files
+  # - pytest: 200 passed in 17.32s
+  # Frontend:
+  # - eslint .: 0 errors, 0 warnings
+  # - tsc --noEmit: 0 errors
+  # - vitest run: 39 passed in 6 test files
+  # - vite build: built in 560ms
+  ```
+- **Execution Log, Security & Blocker Notes**:
+  - All audit findings SEC-01 through SEC-06 resolved.
+  - Zero changes to existing fraud guardrails or decision policy semantics.
+  - No real payment or SMS rails. Blockers: None.
+
 #### Task P2-A3b: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
 
 ---

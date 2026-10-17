@@ -54,8 +54,9 @@ class Settings(BaseSettings):
     AUTH_BOOTSTRAP_OPERATOR_USERNAME: str | None = None
     AUTH_BOOTSTRAP_OPERATOR_PASSWORD: str | None = None
 
-    # Simulated customer verification (P2-A5). Challenge is a simulated OTP — NOT a
-    # real bank authentication channel.
+    # Dedicated secret for HMAC-SHA256 OTP hashing (SEC-05 key separation).
+    # If None, securely falls back to AUTH_JWT_SECRET with fail-closed behavior.
+    VERIFICATION_HMAC_SECRET: str | None = None
     VERIFICATION_OTP_LENGTH: int = 6
     VERIFICATION_CHALLENGE_TTL_SECONDS: int = 300
     VERIFICATION_MAX_ATTEMPTS: int = 5
@@ -63,6 +64,9 @@ class Settings(BaseSettings):
     # Dev-only: expose the simulated OTP in the challenge-creation response so the
     # demo can complete the flow. MUST be false in production. Defaults to false.
     VERIFICATION_EXPOSE_DEV_OTP: bool = False
+    # Abuse controls (SEC-06): bounded database-enforced window limits on challenge creation.
+    VERIFICATION_MAX_CHALLENGES_PER_WINDOW: int = 5
+    VERIFICATION_CHALLENGE_WINDOW_SECONDS: int = 3600
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),

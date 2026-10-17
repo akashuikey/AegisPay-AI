@@ -115,20 +115,48 @@ def generate_otp(length: int) -> str:
     return "".join(str(secrets.randbelow(10)) for _ in range(length))
 
 
-def hash_otp(otp: str, settings: Settings) -> str:
+def get_verification_hmac_secret(settings: Settings) -> str:
+    """Return the dedicated verification HMAC secret, or fall back to AUTH_JWT_SECRET.
+
+    Preserves fail-closed behavior if neither is configured.
+    """
+    if settings.VERIFICATION_HMAC_SECRET:
+        return settings.VERIFICATION_HMAC_SECRET
+    return _require_secret(settings)
+
+
+def hash_otp(otp: str, settings: Settings, secret: str | None = None) -> str:
     """Return a keyed HMAC-SHA256 digest of the OTP (never store plaintext).
 
-    Keyed by the server signing secret so a database leak alone does not permit
-    offline brute force of the short OTP.
+    Uses VERIFICATION_HMAC_SECRET (falling back to AUTH_JWT_SECRET). A specific secret
+    can be passed during key rotation verification.
     """
-    secret = _require_secret(settings)
-    return hmac.new(secret.encode("utf-8"), otp.encode("utf-8"), hashlib.sha256).hexdigest()
+    key = secret or get_verification_hmac_secret(settings)
+    return hmac.new(key.encode("utf-8"), otp.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def verify_otp(otp: str, digest: str, settings: Settings) -> bool:
-    """Constant-time comparison of an OTP against its stored keyed digest."""
-    expected = hash_otp(otp, settings)
-    return hmac.compare_digest(expected, digest)
+    """Constant-time comparison of an OTP against its stored keyed digest.
+
+    Supports dual-key rotation (SEC-05): if VERIFICATION_HMAC_SECRET is set, checks
+    against it; if verification fails and AUTH_JWT_SECRET is configured and differs,
+    attempts verification with AUTH_JWT_SECRET so in-flight challenges are not broken.
+    """
+    primary_secret = get_verification_hmac_secret(settings)
+    expected_primary = hash_otp(otp, settings, secret=primary_secret)
+    if hmac.compare_digest(expected_primary, digest):
+        return True
+
+    # Dual-key rotation fallback: if dedicated HMAC secret is configured,
+    # also attempt verification using AUTH_JWT_SECRET if different.
+    if settings.VERIFICATION_HMAC_SECRET and settings.AUTH_JWT_SECRET:
+        fallback_secret = settings.AUTH_JWT_SECRET
+        if fallback_secret != primary_secret:
+            expected_fallback = hash_otp(otp, settings, secret=fallback_secret)
+            if hmac.compare_digest(expected_fallback, digest):
+                return True
+
+    return False
 
 
 def create_customer_verification_token(

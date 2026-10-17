@@ -381,3 +381,218 @@ async def test_successful_verification_with_strong_residual_fraud_risk_remains_h
     assert body["decision"]["action"] == "HOLD_FOR_INVESTIGATION"
     assert body["transaction_state"] == "HELD_FOR_VERIFICATION"
     assert "VERIFICATION_INSUFFICIENT_RESIDUAL_RISK" in body["decision"]["reason_codes"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_correct_submissions_safe_resolution(client: AsyncClient) -> None:
+    """SEC-02: Concurrent submissions resolve safely and never claim success before decision."""
+    import asyncio
+
+    tx_id = await _drive_to_verification_required(client)
+    ch = await _create_challenge(client, tx_id)
+    headers = _auth(ch["customer_session_token"])
+    payload = {"otp": ch["dev_otp"]}
+    url = f"/api/v1/verification/{ch['challenge_id']}/submit"
+
+    res1, res2 = await asyncio.gather(
+        client.post(url, json=payload, headers=headers),
+        client.post(url, json=payload, headers=headers),
+    )
+
+    # Both requests must complete cleanly without 500 errors.
+    assert res1.status_code in (200, 409)
+    assert res2.status_code in (200, 409)
+
+    # At least one request won and returned 200 with decision.
+    successes = [r for r in (res1, res2) if r.status_code == 200]
+    assert len(successes) >= 1
+    winner = successes[0].json()
+    assert winner["result"] == "SUCCEEDED"
+    assert winner["decision"] is not None
+    assert winner["decision"]["action"] == "ALLOW"
+    assert winner["transaction_state"] == "SETTLED_SIMULATED"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_racing_correct_and_incorrect_no_missing_greenlet(
+    client: AsyncClient,
+) -> None:
+    """SEC-01: Correct racing incorrect does not crash with MissingGreenlet."""
+    import asyncio
+
+    tx_id = await _drive_to_verification_required(client)
+    ch = await _create_challenge(client, tx_id)
+    headers = _auth(ch["customer_session_token"])
+    wrong_otp = "000000" if ch["dev_otp"] != "000000" else "111111"
+    url = f"/api/v1/verification/{ch['challenge_id']}/submit"
+
+    res_correct, res_incorrect = await asyncio.gather(
+        client.post(url, json={"otp": ch["dev_otp"]}, headers=headers),
+        client.post(url, json={"otp": wrong_otp}, headers=headers),
+    )
+
+    # Neither request should return 500 Internal Server Error
+    assert res_correct.status_code in (200, 409)
+    assert res_incorrect.status_code == 200
+
+    # The transaction must be in a consistent state (either resolved or held)
+    tx = (await client.get(f"/api/v1/transactions/{tx_id}")).json()
+    assert tx["state"] in ("SETTLED_SIMULATED", "VERIFICATION_REQUIRED", "HELD_FOR_VERIFICATION")
+
+
+@pytest.mark.asyncio
+async def test_duplicate_concurrent_challenge_creation_handled_gracefully(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """SEC-03: Concurrent creation resolves via partial unique index without duplicates."""
+    import asyncio
+
+    tx_id = await _drive_to_verification_required(client)
+
+    res1, res2 = await asyncio.gather(
+        client.post(f"/api/v1/transactions/{tx_id}/verification", json={}),
+        client.post(f"/api/v1/transactions/{tx_id}/verification", json={}),
+    )
+
+    assert res1.status_code in (200, 201)
+    assert res2.status_code in (200, 201)
+
+    # Exactly one challenge ID is active for this transaction
+    ch1_id = res1.json()["challenge_id"]
+    ch2_id = res2.json()["challenge_id"]
+    assert ch1_id == ch2_id
+
+    # Verify database has at most 1 PENDING challenge for this transaction
+    pending_challenges = (
+        (
+            await db_session.execute(
+                select(VerificationChallengeModel).where(
+                    VerificationChallengeModel.transaction_id == uuid.UUID(tx_id),
+                    VerificationChallengeModel.status == "PENDING",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(pending_challenges) == 1
+
+
+@pytest.mark.asyncio
+async def test_submission_rejected_when_transaction_in_terminal_state(
+    client: AsyncClient,
+) -> None:
+    """SEC-04: Submission on cancelled transaction fails safely."""
+    tx_id = await _drive_to_verification_required(client)
+    ch = await _create_challenge(client, tx_id)
+
+    # Cancel transaction
+    cancel_res = await client.post(
+        f"/api/v1/transactions/{tx_id}/transitions",
+        json={
+            "target_state": "CANCELLED_SIMULATED",
+            "actor_type": "CUSTOMER",
+            "reason": "Customer cancelled during verification",
+        },
+    )
+    assert cancel_res.status_code == 200
+
+    # Submit OTP -> must reject with TRANSACTION_TERMINAL (409)
+    res = await client.post(
+        f"/api/v1/verification/{ch['challenge_id']}/submit",
+        json={"otp": ch["dev_otp"]},
+        headers=_auth(ch["customer_session_token"]),
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "TRANSACTION_TERMINAL"
+
+
+@pytest.mark.asyncio
+async def test_submission_rejected_when_transaction_not_verification_required(
+    client: AsyncClient,
+) -> None:
+    """SEC-04: Submission when transaction moved to HUMAN_REVIEW rejects before verifying."""
+    tx_id = await _drive_to_verification_required(client)
+    ch = await _create_challenge(client, tx_id)
+
+    # Operator transitions to INVESTIGATING then HUMAN_REVIEW
+    await client.post(
+        f"/api/v1/transactions/{tx_id}/transitions",
+        json={"target_state": "INVESTIGATING", "actor_type": "CUSTOMER", "reason": "investigating"},
+    )
+    await client.post(
+        f"/api/v1/transactions/{tx_id}/transitions",
+        json={
+            "target_state": "HUMAN_REVIEW",
+            "actor_type": "INVESTIGATOR",
+            "reason": "operator escalation",
+        },
+    )
+
+    # Submit OTP -> must reject with VERIFICATION_NOT_REQUIRED (409)
+    res = await client.post(
+        f"/api/v1/verification/{ch['challenge_id']}/submit",
+        json={"otp": ch["dev_otp"]},
+        headers=_auth(ch["customer_session_token"]),
+    )
+    assert res.status_code == 409
+    assert res.json()["error"]["code"] == "VERIFICATION_NOT_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_hmac_secret_key_rotation_dual_verification() -> None:
+    """SEC-05: verify_otp supports key rotation using fallback secret for legacy challenges."""
+    from app.core.config import Settings
+    from app.core.security import hash_otp, verify_otp
+
+    # 1. Challenge was hashed under initial secret (e.g. AUTH_JWT_SECRET)
+    initial_settings = Settings(
+        AUTH_JWT_SECRET="old-legacy-jwt-secret-string-32bytes",
+        VERIFICATION_HMAC_SECRET=None,
+    )
+    otp = "654321"
+    digest = hash_otp(otp, initial_settings)
+
+    # 2. Key is rotated: new dedicated VERIFICATION_HMAC_SECRET is deployed
+    rotated_settings = Settings(
+        AUTH_JWT_SECRET="old-legacy-jwt-secret-string-32bytes",
+        VERIFICATION_HMAC_SECRET="new-dedicated-hmac-secret-string",
+    )
+
+    # Existing digest matches via dual-key fallback rotation!
+    assert verify_otp(otp, digest, rotated_settings) is True
+
+    # New digest hashed with new dedicated secret also matches
+    new_digest = hash_otp(otp, rotated_settings)
+    assert verify_otp(otp, new_digest, rotated_settings) is True
+
+    # Wrong OTP still fails
+    assert verify_otp("000000", digest, rotated_settings) is False
+
+
+@pytest.mark.asyncio
+async def test_challenge_creation_abuse_rate_limit(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """SEC-06: Database-backed rate limit bounds repeated challenge creation abuse."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    tx_id = await _drive_to_verification_required(client)
+
+    # Rapidly create challenges by forcing expiry on each so a new one is requested
+    limit = settings.VERIFICATION_MAX_CHALLENGES_PER_WINDOW
+    for _i in range(limit):
+        ch = await _create_challenge(client, tx_id)
+        # Force expiry in DB so the next call attempts to create a new challenge
+        await db_session.execute(
+            VerificationChallengeModel.__table__.update()
+            .where(VerificationChallengeModel.id == uuid.UUID(ch["challenge_id"]))
+            .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await db_session.commit()
+
+    # The next attempt must be rejected by database-backed rate limit (429)
+    res = await client.post(f"/api/v1/transactions/{tx_id}/verification", json={})
+    assert res.status_code == 429
+    assert res.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"

@@ -205,11 +205,18 @@ class TransactionRepository:
     async def create_challenge(
         self, challenge: VerificationChallengeModel
     ) -> VerificationChallengeModel:
-        """Persist a new verification challenge."""
+        """Persist a new verification challenge.
+
+        Rolls back on IntegrityError (e.g. concurrent creation).
+        """
         self.session.add(challenge)
-        await self.session.commit()
-        await self.session.refresh(challenge)
-        return challenge
+        try:
+            await self.session.commit()
+            await self.session.refresh(challenge)
+            return challenge
+        except IntegrityError:
+            await self.session.rollback()
+            raise
 
     async def get_challenge_by_id(self, challenge_id: UUID) -> VerificationChallengeModel | None:
         """Fetch a verification challenge by primary key."""
@@ -235,13 +242,31 @@ class TransactionRepository:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def count_recent_challenges_for_transaction(
+        self, transaction_id: UUID, window_seconds: int
+    ) -> int:
+        """Count challenges created for a transaction within a recent time window."""
+        from datetime import UTC, datetime, timedelta
+
+        cutoff = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        stmt = (
+            select(func.count())
+            .select_from(VerificationChallengeModel)
+            .where(
+                VerificationChallengeModel.transaction_id == transaction_id,
+                VerificationChallengeModel.created_at >= cutoff,
+            )
+        )
+        result = await self.session.execute(stmt)
+        return int(result.scalar_one() or 0)
+
     async def update_challenge_fields(
         self, challenge_id: UUID, expected_version: int, values: dict[str, Any]
     ) -> bool:
         """Atomically update a challenge guarded by its version (optimistic lock).
 
         Returns True iff exactly one row was updated (the caller won the race).
-        Always bumps the version. Commits on success, rolls back otherwise.
+        Always bumps the version. Commits on success.
         """
         payload = dict(values)
         payload["version"] = expected_version + 1
@@ -257,8 +282,6 @@ class TransactionRepository:
         won = isinstance(result, CursorResult) and result.rowcount == 1
         if won:
             await self.session.commit()
-        else:
-            await self.session.rollback()
         return won
 
     async def set_challenge_decision(

@@ -20,6 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -476,7 +477,15 @@ class VerificationChallengeModel(Base):
     """
 
     __tablename__ = "verification_challenges"
-    __table_args__ = (Index("ix_verification_challenges_tx_status", "transaction_id", "status"),)
+    __table_args__ = (
+        Index("ix_verification_challenges_tx_status", "transaction_id", "status"),
+        Index(
+            "uq_verification_challenges_pending_tx",
+            "transaction_id",
+            unique=True,
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
