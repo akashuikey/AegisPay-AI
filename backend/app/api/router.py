@@ -9,6 +9,7 @@ from app.api import (
     auth,
     coercion,
     conversations,
+    fraud_responses,
     investigations,
     risk,
     transactions,
@@ -25,6 +26,9 @@ router.include_router(auth.router)
 # Customer verification submission: authorized by a distinct customer verification
 # session token (validated inside the router), NOT the operator access token.
 router.include_router(verification.router)
+
+# Fraud responses and customer interventions (individual routes declare operator vs customer auth)
+router.include_router(fraud_responses.router)
 
 # Operator-only: every operations-console router requires an authenticated
 # operator. Applying the dependency at include time uniformly gates all routes

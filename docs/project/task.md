@@ -696,6 +696,57 @@
   # - vite build: built in 588ms
   ```
 
+#### Task P2-A7: Automated Fraud Response & Customer Intervention
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer
+- **Status**: `DONE`
+- **Objective**: Build an end-to-end automated response orchestration layer for AegisPay AI. Consumes transaction risk assessments, deterministic decisions, customer verification outcomes, investigation findings, and coercion intelligence to execute policy-authorized simulated responses and communicate them clearly and empathetically to the customer. All payments, holds, blocks, and notifications remain strictly simulated in sandbox mode.
+- **Deliverables**:
+  1. `backend/app/domain/response_orchestration.py`: Domain value types (`ResponseType`, `CustomerActionRequired`, `NotificationChannel`, `NotificationDeliveryStatus`, `ResponseProcessingStatus`), `CustomerIntervention` dataclass, mapping table `ACTION_TO_RESPONSE_TYPE`, `build_customer_intervention()` factory for all 4 policy actions, and `mask_recipient_contact()` for phones, emails, and handles.
+  2. `backend/app/services/notification_service.py`: `NotificationServiceProtocol` and `SimulatedNotificationService` supporting multiple simulated channels (`IN_APP_SIMULATED`, `SMS_SIMULATED`, `WHATSAPP_SIMULATED`, `EMAIL_SIMULATED`), secret redaction, and `simulate_failure=True` resulting in `FAILED_SIMULATED` with `SIMULATED_CARRIER_TIMEOUT`.
+  3. `backend/app/core/errors.py`: Added `FraudResponseError` (HTTP 400) and `StaleDecisionError` (HTTP 409).
+  4. `backend/app/db/models.py`: Added `TransactionResponseModel` and `TransactionNotificationModel` mapped entities with back-populates on `TransactionModel`.
+  5. Alembic async migration `0011_create_fraud_responses_and_notifications.py`: applied and tested (upgrade head, downgrade -1, re-upgrade head).
+  6. `backend/app/repositories/transaction_repository.py`: persistence and query methods (`create_response`, `get_response_by_id`, `get_response_by_decision_id`, `get_latest_response_for_transaction`, `list_responses_for_transaction`, `get_response_by_idempotency_key`, `create_notification`, `get_notifications_for_response`, `get_notification_by_channel`).
+  7. `backend/app/schemas/fraud_response.py`: Pydantic request/response schemas (`ExecuteResponseRequest`, `NotificationResponse`, `CustomerInterventionResponse`, `FraudResponseDetails`).
+  8. `backend/app/services/response_orchestration_service.py`: `ResponseOrchestrationService` coordinating decision workflow, state verification, intervention generation, notification dispatch, rollback-safe persistence, and customer intervention query.
+  9. REST API in `backend/app/api/fraud_responses.py` & `backend/app/api/router.py`:
+      - `POST /api/v1/transactions/{id}/respond`: operator-authenticated response orchestration (201 created, 200 replay).
+      - `GET /api/v1/transactions/{id}/responses`: operator-authenticated response history.
+      - `GET /api/v1/transactions/{id}/responses/latest`: operator-authenticated latest response.
+      - `GET /api/v1/transactions/{id}/intervention`: operator or customer-token scoped intervention endpoint.
+  10. Frontend API client `frontend/src/api/responseApi.ts`: typed fetchers (`executeResponseApi`, `getLatestResponseApi`, `listResponsesApi`, `getCustomerInterventionApi`).
+  11. Frontend UI component `frontend/src/components/CustomerInterventionPanel.tsx`: integrated into `TransactionDrawer` under both `'Decision & history'` and `'AI Investigation'` tabs. Features step progression timeline (Assess → Policy → Response → Alert), response type badge, customer-safe advice card, next steps list, notification delivery card with masked recipient and safety isolation note, operator channel controls with simulated failure toggle, and prominent simulation disclaimer.
+  12. Comprehensive test suites:
+      - Domain unit tests in `backend/tests/unit/test_response_orchestration_domain.py` (8 tests).
+      - Integration tests in `backend/tests/integration/test_response_orchestration_api.py` (11 tests).
+      - Frontend component tests in `frontend/src/__tests__/CustomerInterventionPanel.test.tsx` (5 tests).
+  13. Architectural decision record: `docs/decisions/ADR-006-automated-fraud-response-and-customer-intervention.md`.
+- **Acceptance Criteria**:
+  - [x] Authoritative policy decisions automatically execute corresponding simulated response types (`ALLOW_SETTLED`, `VERIFICATION_REQUIRED`, `HOLD_PROTECTIVE`, `BLOCK_SAFETY`).
+  - [x] Customer messages are empathetic, non-accusatory, understandable, and free of internal detection jargon or mule keywords.
+  - [x] Customer advice warns against calling suspicious phone numbers and directs solely to official bank channels.
+  - [x] Notification delivery failure (`FAILED_SIMULATED`) is strictly isolated from safety decisions (cannot downgrade hold or block).
+  - [x] Contact identifiers are masked (`***`); zero OTPs, bearer tokens, or transcripts appear in notification bodies or logs.
+  - [x] Full idempotency on repeat response requests (`uq_transaction_responses_tx_idempotency`).
+  - [x] Concurrency safety with ORM rollback hardening (no `MissingGreenlet` errors).
+  - [x] Customer verification tokens are strictly scoped to the transaction ID for intervention access.
+  - [x] All 246 backend tests and 48 frontend tests pass (294 total tests, 100% green).
+  - [x] All quality gates pass (`make check-all`: ruff check, ruff format, mypy, pytest, eslint, tsc, vitest, vite build).
+- **Verification Commands & Results**:
+  ```bash
+  POSTGRES_PORT=5433 make check-all
+  # Backend:
+  # - uv run ruff check app/ tests/: All checks passed!
+  # - uv run ruff format --check app/ tests/: 87 files already formatted
+  # - uv run mypy app: Success: no issues found in 64 source files
+  # - uv run pytest: 246 passed in 23.54s
+  # Frontend:
+  # - eslint .: 0 errors, 0 warnings
+  # - tsc --noEmit: 0 errors
+  # - vitest run: 48 passed in 8 test files
+  # - vite build: built in 600ms
+  ```
+
 ---
 
 ### Phase 3: Customer Portal & Dynamic Intervention UI
@@ -707,4 +758,5 @@
 ### Phase 5: End-to-End Scenarios, Hardening & Demonstration
 - **Task P5-A1**: End-to-End Integration of the Six Fraud Demo Scenarios (`NOT_STARTED`)
 - **Task P5-A2**: Final Security Hardening, Audit Trail Verification & Demo Runbook (`NOT_STARTED`)
+
 

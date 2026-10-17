@@ -253,6 +253,39 @@ class VerificationError(AppException):
         )
 
 
+class FraudResponseError(AppException):
+    """Raised when automated fraud response orchestration cannot be completed."""
+
+    def __init__(
+        self,
+        message: str,
+        code: str = "FRAUD_RESPONSE_ERROR",
+        status_code: int = status.HTTP_400_BAD_REQUEST,
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code=code,
+            status_code=status_code,
+            details=details,
+        )
+
+
+class StaleDecisionError(ConflictError):
+    """Raised when an automated response attempts to apply a stale or superseded decision."""
+
+    def __init__(
+        self,
+        message: str = "Transaction state has evolved; the referenced decision is stale",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            details=details,
+        )
+        self.code = "STALE_DECISION"
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Register custom exception handlers on the FastAPI application."""
 

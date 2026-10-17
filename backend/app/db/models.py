@@ -202,6 +202,14 @@ class TransactionModel(Base):
         order_by="TransactionCoercionAnalysisModel.created_at.desc()",
     )
 
+    # Relationship to automated response records (P2-A7)
+    responses: Mapped[list["TransactionResponseModel"]] = relationship(
+        "TransactionResponseModel",
+        back_populates="transaction",
+        cascade="all, delete-orphan",
+        order_by="TransactionResponseModel.created_at.desc()",
+    )
+
 
 class TransactionAuditModel(Base):
     """Append-only audit trail recording state transitions and lifecycle events."""
@@ -776,4 +784,186 @@ class TransactionCoercionAnalysisModel(Base):
     transaction: Mapped["TransactionModel"] = relationship(
         "TransactionModel",
         back_populates="coercion_analyses",
+    )
+
+
+class TransactionResponseModel(Base):
+    """Persistent record of automated response orchestration & customer intervention (P2-A7)."""
+
+    __tablename__ = "transaction_responses"
+    __table_args__ = (
+        Index("ix_transaction_responses_tx_created", "transaction_id", "created_at"),
+        UniqueConstraint(
+            "transaction_id",
+            "idempotency_key",
+            name="uq_transaction_responses_tx_idempotency",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transaction_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    response_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    action: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    processing_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="COMPLETED",
+    )
+    from_state: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    to_state: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    headline: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False,
+    )
+    customer_message: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    customer_action_required: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="NONE",
+    )
+    next_steps: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    # Relationships
+    transaction: Mapped["TransactionModel"] = relationship(
+        "TransactionModel",
+        back_populates="responses",
+    )
+    decision: Mapped["TransactionDecisionModel | None"] = relationship(
+        "TransactionDecisionModel",
+    )
+    notifications: Mapped[list["TransactionNotificationModel"]] = relationship(
+        "TransactionNotificationModel",
+        back_populates="response",
+        cascade="all, delete-orphan",
+        order_by="TransactionNotificationModel.created_at.asc()",
+    )
+
+
+class TransactionNotificationModel(Base):
+    """Persistent record of a simulated customer notification (P2-A7)."""
+
+    __tablename__ = "transaction_notifications"
+    __table_args__ = (
+        Index("ix_transaction_notifications_tx_created", "transaction_id", "created_at"),
+        UniqueConstraint(
+            "response_id",
+            "channel",
+            name="uq_transaction_notifications_response_channel",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    response_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transaction_responses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    channel: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    recipient_masked: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+    )
+    subject: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+    message_body: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    delivery_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="DELIVERED_SIMULATED",
+    )
+    failure_reason: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Relationships
+    response: Mapped["TransactionResponseModel"] = relationship(
+        "TransactionResponseModel",
+        back_populates="notifications",
+    )
+    transaction: Mapped["TransactionModel"] = relationship(
+        "TransactionModel",
     )

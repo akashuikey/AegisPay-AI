@@ -10,6 +10,7 @@ import { InvestigationConversationPanel } from './components/InvestigationConver
 import { InvestigationReviewPanel } from './components/InvestigationReviewPanel';
 import { VerificationPanel } from './components/VerificationPanel';
 import { CoercionAnalysisPanel } from './components/CoercionAnalysisPanel';
+import { CustomerInterventionPanel } from './components/CustomerInterventionPanel';
 import {
   evaluateRiskApi,
   evaluateRiskLocally,
@@ -2627,6 +2628,12 @@ function TransactionDrawer({
             />
             <VerificationPanel transactionId={tx.id} />
             <CoercionAnalysisPanel transactionId={tx.id} />
+            <CustomerInterventionPanel
+              transactionId={tx.id}
+              transactionRecipient={tx.recipient}
+              transactionAmount={tx.amount}
+              onResponseExecuted={onRetry}
+            />
             <InvestigationConversationPanel
               transactionId={tx.id}
               transactionRecipient={tx.recipient}
@@ -2637,6 +2644,12 @@ function TransactionDrawer({
 
         {tab === 'Decision & history' && (
           <>
+            <CustomerInterventionPanel
+              transactionId={tx.id}
+              transactionRecipient={tx.recipient}
+              transactionAmount={tx.amount}
+              onResponseExecuted={onRetry}
+            />
             <section className="drawer-section">
               <h3>Final decision</h3>
               <div className="decision-outcome-summary">

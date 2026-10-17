@@ -19,6 +19,8 @@ from app.db.models import (
     TransactionDecisionModel,
     TransactionInvestigationModel,
     TransactionModel,
+    TransactionNotificationModel,
+    TransactionResponseModel,
     VerificationChallengeModel,
 )
 
@@ -452,6 +454,113 @@ class TransactionRepository:
         """Fetch a coercion analysis by its primary key."""
         stmt = select(TransactionCoercionAnalysisModel).where(
             TransactionCoercionAnalysisModel.id == analysis_id
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    # --- P2-A7: Automated Fraud Response & Notification Persistence ---
+
+    async def create_response(self, response: TransactionResponseModel) -> TransactionResponseModel:
+        """Persist a new transaction response record."""
+        self.session.add(response)
+        await self.session.commit()
+        await self.session.refresh(response, ["notifications"])
+        return response
+
+    async def get_response_by_id(self, response_id: UUID) -> TransactionResponseModel | None:
+        """Fetch a transaction response with notifications loaded eagerly."""
+        stmt = (
+            select(TransactionResponseModel)
+            .where(TransactionResponseModel.id == response_id)
+            .options(selectinload(TransactionResponseModel.notifications))
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_response_by_decision_id(
+        self, decision_id: UUID
+    ) -> TransactionResponseModel | None:
+        """Fetch the response associated with a specific decision."""
+        stmt = (
+            select(TransactionResponseModel)
+            .where(TransactionResponseModel.decision_id == decision_id)
+            .options(selectinload(TransactionResponseModel.notifications))
+            .order_by(TransactionResponseModel.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_latest_response_for_transaction(
+        self, transaction_id: UUID
+    ) -> TransactionResponseModel | None:
+        """Fetch the latest response for a transaction."""
+        stmt = (
+            select(TransactionResponseModel)
+            .where(TransactionResponseModel.transaction_id == transaction_id)
+            .options(selectinload(TransactionResponseModel.notifications))
+            .order_by(TransactionResponseModel.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_responses_for_transaction(
+        self, transaction_id: UUID
+    ) -> list[TransactionResponseModel]:
+        """List all responses for a transaction in chronological order."""
+        stmt = (
+            select(TransactionResponseModel)
+            .where(TransactionResponseModel.transaction_id == transaction_id)
+            .options(selectinload(TransactionResponseModel.notifications))
+            .order_by(TransactionResponseModel.created_at.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_response_by_idempotency_key(
+        self, transaction_id: UUID, idempotency_key: str
+    ) -> TransactionResponseModel | None:
+        """Fetch a response by transaction and idempotency key."""
+        stmt = (
+            select(TransactionResponseModel)
+            .where(
+                TransactionResponseModel.transaction_id == transaction_id,
+                TransactionResponseModel.idempotency_key == idempotency_key,
+            )
+            .options(selectinload(TransactionResponseModel.notifications))
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def create_notification(
+        self, notification: TransactionNotificationModel
+    ) -> TransactionNotificationModel:
+        """Persist a new transaction notification record."""
+        self.session.add(notification)
+        await self.session.commit()
+        await self.session.refresh(notification)
+        return notification
+
+    async def get_notifications_for_response(
+        self, response_id: UUID
+    ) -> list[TransactionNotificationModel]:
+        """List notifications belonging to a response."""
+        stmt = (
+            select(TransactionNotificationModel)
+            .where(TransactionNotificationModel.response_id == response_id)
+            .order_by(TransactionNotificationModel.created_at.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_notification_by_channel(
+        self, response_id: UUID, channel: str
+    ) -> TransactionNotificationModel | None:
+        """Fetch an existing notification for a response on a specific channel."""
+        stmt = select(TransactionNotificationModel).where(
+            TransactionNotificationModel.response_id == response_id,
+            TransactionNotificationModel.channel == channel,
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()

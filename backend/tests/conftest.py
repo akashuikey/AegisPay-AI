@@ -97,7 +97,8 @@ async def clean_database_after_test() -> AsyncGenerator[None, None]:
         try:
             await session.execute(
                 text(
-                    "TRUNCATE TABLE transaction_coercion_analyses, verification_challenges, "
+                    "TRUNCATE TABLE transaction_notifications, transaction_responses, "
+                    "transaction_coercion_analyses, verification_challenges, "
                     "transaction_decisions, transaction_investigations, transaction_assessments, "
                     "transaction_audits, transactions, operators RESTART IDENTITY CASCADE;"
                 )
@@ -143,6 +144,7 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
     import uuid as _uuid
 
     from app.api.auth import get_current_operator
+    from app.api.fraud_responses import get_current_operator_optional
     from app.db.models import OperatorModel
 
     app = _build_test_app()
@@ -153,6 +155,7 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
         is_active=True,
     )
     app.dependency_overrides[get_current_operator] = lambda: stub_operator
+    app.dependency_overrides[get_current_operator_optional] = lambda: stub_operator
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as async_client:
