@@ -115,6 +115,20 @@ Allowed Transition Matrix:
 
 ## 5. Security & Isolation Architecture
 
+0. **Operator Authentication & Authorization** (see [ADR-002](../decisions/ADR-002-operator-authentication.md)):
+   - Every operations-console route (`/api/v1/transactions`, `/api/v1/risk`,
+     `/api/v1/investigations`, `/api/v1/conversations`) requires an authenticated
+     operator via the `get_current_operator` dependency. `/api/v1/auth/login` and
+     `/health/*` are public.
+   - Identity is server-validated: login checks a bcrypt password hash in the
+     `operators` table and issues a short-lived HS256 **Bearer JWT** (`AUTH_JWT_SECRET`);
+     identity is never inferred from a caller-supplied id or header.
+   - Authorization model is **operator-shared** (any active operator may access any
+     case), matching the bank-wide operations-console persona. Transaction-scoped
+     conversation routes additionally enforce `conversation.transaction_id == transaction_id`.
+   - Auth fails closed: no default signing secret; missing config → 503; bad
+     credentials/tokens → generic `401 UNAUTHENTICATED`.
+
 1. **Zero Secret Leakage**:
    - Error handlers redact raw exception tracebacks and database connection details from client responses.
    - Vite environment variables are explicitly scoped (`VITE_*`) and documented as public browser-facing strings.
@@ -126,6 +140,7 @@ Allowed Transition Matrix:
 ## 6. Architecture Decision Records (ADRs)
 
 - [ADR-001: Initial Architecture Baseline](../decisions/ADR-001-initial-architecture.md)
+- [ADR-002: Operator Authentication & Authorization Boundary](../decisions/ADR-002-operator-authentication.md)
 
 ---
 

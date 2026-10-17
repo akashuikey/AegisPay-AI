@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     GEMINI_MAX_RETRIES: int = 2
     INVESTIGATION_MAX_CONVERSATION_TURNS: int = 20
 
+    # Authentication & Authorization (operator identity boundary)
+    # AUTH_JWT_SECRET has no insecure default: auth fails closed until it is configured.
+    AUTH_JWT_SECRET: str | None = None
+    AUTH_JWT_ALGORITHM: str = "HS256"
+    AUTH_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    # Optional bootstrap operator provisioned on startup for local dev / demo login.
+    AUTH_BOOTSTRAP_OPERATOR_USERNAME: str | None = None
+    AUTH_BOOTSTRAP_OPERATOR_PASSWORD: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8",

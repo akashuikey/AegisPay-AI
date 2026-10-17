@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -24,6 +25,43 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.domain.state_machine import TransactionState
+
+
+class OperatorModel(Base):
+    """A fraud-operations analyst identity authorized to use the operations console."""
+
+    __tablename__ = "operators"
+    __table_args__ = (UniqueConstraint("username", name="uq_operators_username"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    username: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    password_hash: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
 
 class TransactionModel(Base):

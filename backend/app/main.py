@@ -29,6 +29,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         settings.LOG_LEVEL,
     )
 
+    # Provision the configured bootstrap operator so the demo has a login.
+    from app.db.session import get_session_factory
+    from app.services.auth_bootstrap import ensure_bootstrap_operator
+
+    try:
+        await ensure_bootstrap_operator(get_session_factory(), settings)
+    except Exception:  # noqa: BLE001 - startup bootstrap must not crash the app boundary
+        logger.exception("Bootstrap operator provisioning failed; continuing startup.")
+
     yield
 
     # Shutdown: Clean up database connection pools and resources

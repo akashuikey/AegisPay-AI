@@ -3,6 +3,7 @@
 from collections.abc import AsyncGenerator
 
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
@@ -30,6 +31,8 @@ def get_test_settings() -> Settings:
         LOG_LEVEL="DEBUG",
         POSTGRES_DB="test_aegispay",
         CORS_ORIGINS=["http://testserver"],
+        AUTH_JWT_SECRET="test-jwt-secret-not-for-production",
+        AUTH_ACCESS_TOKEN_EXPIRE_MINUTES=60,
     )
 
 
@@ -94,7 +97,7 @@ async def clean_database_after_test() -> AsyncGenerator[None, None]:
             await session.execute(
                 text(
                     "TRUNCATE TABLE transaction_investigations, transaction_assessments, "
-                    "transaction_audits, transactions RESTART IDENTITY CASCADE;"
+                    "transaction_audits, transactions, operators RESTART IDENTITY CASCADE;"
                 )
             )
             await session.commit()
@@ -108,9 +111,8 @@ def test_settings() -> Settings:
     return get_test_settings()
 
 
-@pytest.fixture
-async def client() -> AsyncGenerator[AsyncClient, None]:
-    """Provide an asynchronous HTTP client bound to the test application."""
+def _build_test_app() -> FastAPI:
+    """Construct the app with test DB session and mock AI client overrides."""
     app = create_app()
 
     async def override_get_db_session() -> AsyncGenerator[AsyncSession, None]:
@@ -125,7 +127,42 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides[get_settings] = get_test_settings
     app.dependency_overrides[get_db_session] = override_get_db_session
     app.dependency_overrides[get_default_ai_client] = lambda: MockGeminiClient()
+    return app
 
+
+@pytest.fixture
+async def client() -> AsyncGenerator[AsyncClient, None]:
+    """Authenticated HTTP client: a stub operator is injected for console routes.
+
+    The real authentication pipeline is exercised separately in the auth test
+    suite; here we inject an operator so existing business-logic tests continue
+    to verify behavior behind the auth boundary without logging in each time.
+    """
+    import uuid as _uuid
+
+    from app.api.auth import get_current_operator
+    from app.db.models import OperatorModel
+
+    app = _build_test_app()
+    stub_operator = OperatorModel(
+        id=_uuid.uuid4(),
+        username="test_operator",
+        password_hash="unused",
+        is_active=True,
+    )
+    app.dependency_overrides[get_current_operator] = lambda: stub_operator
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+        yield async_client
+
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+async def unauth_client() -> AsyncGenerator[AsyncClient, None]:
+    """HTTP client with the real authentication boundary intact (no operator injected)."""
+    app = _build_test_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as async_client:
         yield async_client

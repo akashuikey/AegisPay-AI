@@ -346,6 +346,47 @@
     only without the local `POSTGRES_PORT=5433` override needed to reach the relocated DB in this
     environment). Frontend: eslint clean, tsc clean, 14 vitest passed, vite build OK.
 
+#### Task P2-A2.1: Authentication & Object-Level Authorization
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer
+- **Status**: `DONE`
+- **Objective**: Add a minimal, real, server-validated authentication and authorization boundary to the operations console, closing the IDOR/no-auth blocker identified in the P2-A2 audit. Built on commit `4746529`. See [ADR-002](../decisions/ADR-002-operator-authentication.md).
+- **Decisions (confirmed with user)**: operator-shared authorization; Bearer JWT transport; `operators` table + env bootstrap.
+- **Deliverables**:
+  1. `pyjwt` + `bcrypt` dependencies; `AUTH_*` settings in `config.py` and `.env.example` (fail-closed: no default `AUTH_JWT_SECRET`).
+  2. `app/core/security.py` — bcrypt hashing + HS256 JWT issue/verify (no custom crypto).
+  3. `OperatorModel` + migration `0006_create_operators` (unique `username`, bcrypt `password_hash`, `is_active`).
+  4. `OperatorRepository`; `app/api/auth.py` with `POST /api/v1/auth/login`, `GET /api/v1/auth/me`, and the `get_current_operator` dependency.
+  5. Router wiring: all four console routers (`transactions`, `risk`, `investigations`, `conversations`) gated by `get_current_operator`; `/auth/login` and `/health/*` remain public.
+  6. Startup bootstrap (`auth_bootstrap.ensure_bootstrap_operator`, idempotent) provisioning the demo operator from env.
+  7. Frontend: `authApi.ts` (token store + `apiFetch` bearer wrapper + 401 forced-logout), all API clients route through `apiFetch`, and an `AuthGate` login screen gating the console (UI otherwise unchanged).
+- **Acceptance Criteria**:
+  - [x] Identity is server-validated (JWT), never inferred from a caller-supplied id/header.
+  - [x] No hardcoded shared password or embedded signing secret; secrets via env; documented bootstrap/login flow.
+  - [x] All operations-console routes (incl. the previously unscoped `/conversations/{id}` routes) require authentication; bad credentials/tokens → generic `401 UNAUTHENTICATED`.
+  - [x] Established, maintained crypto libraries (`PyJWT`, `bcrypt`); fail-closed when unconfigured.
+  - [x] All quality gates pass; new auth tests added.
+- **Verification Commands & Results**:
+  ```bash
+  cd backend
+  uv run ruff check .            # All checks passed!
+  uv run ruff format --check .   # 60 files already formatted
+  uv run mypy app                # Success: no issues found in 43 source files
+  uv run pytest                  # 140 passed (+21: 14 auth integration, 7 security unit);
+                                 # test_config default-port assertion passes without the local
+                                 # POSTGRES_PORT=5433 override used to reach the relocated DB
+  # Live smoke (uvicorn): unauth /transactions=401, login=200+JWT, /transactions w/ token=200,
+  #   bad password=401, /auth/me=operator identity, /health/live=200 (public). Bootstrap operator
+  #   provisioned by lifespan. Server log clean (only expected 401 warnings).
+  cd ../frontend
+  npm run lint && npm run typecheck   # clean
+  npm run test                        # 17 passed (+3 AuthGate)
+  npm run build                       # built OK
+  ```
+- **Execution Log, Security & Blocker Notes**:
+  - **Blocker resolved (for the operator model)**: the console is no longer reachable without authentication; the `/conversations/{id}` IDOR surface is gated. The former "no authentication / IDOR" deployment blocker is closed under the operator-shared model.
+  - **Remaining future work (not blockers for a private demo)**: per-operator audit attribution, role tiers, token revocation/refresh, `/auth/login` rate limiting, and an external IdP for production multi-tenant use.
+  - Zero P2-A3 code initiated.
+
 #### Task P2-A3: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
 
 ---

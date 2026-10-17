@@ -4,6 +4,7 @@
  */
 
 import { config } from '../config';
+import { apiFetch } from './authApi';
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 export type RecommendedAction =
@@ -490,7 +491,7 @@ export function evaluateRiskLocally(evidence: TransactionEvidenceInput): RiskAss
 export async function evaluateRiskApi(evidence: TransactionEvidenceInput): Promise<RiskAssessmentResponse> {
   const url = `${config.apiBaseUrl}/api/v1/risk/evaluate`;
   try {
-    const response = await fetch(url, {
+    const response = await apiFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(evidence),
@@ -516,7 +517,7 @@ export async function evaluateRiskApi(evidence: TransactionEvidenceInput): Promi
 export async function fetchScenariosApi(): Promise<DemoScenarioDefinition[]> {
   const url = `${config.apiBaseUrl}/api/v1/risk/scenarios`;
   try {
-    const response = await fetch(url);
+    const response = await apiFetch(url);
     if (response.ok) {
       const data = await response.json();
       if (Array.isArray(data) && data.length > 0) {

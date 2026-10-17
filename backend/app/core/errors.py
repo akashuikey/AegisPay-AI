@@ -203,6 +203,38 @@ class ConversationInactiveError(AppException):
         )
 
 
+class AuthenticationError(AppException):
+    """Raised when a request lacks valid authentication credentials."""
+
+    def __init__(
+        self,
+        message: str = "Authentication credentials were missing or invalid",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code="UNAUTHENTICATED",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            details=details,
+        )
+
+
+class AuthConfigurationError(AppException):
+    """Raised when authentication is required but the server is not configured for it."""
+
+    def __init__(
+        self,
+        message: str = "Authentication is not configured on this server",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code="AUTH_CONFIGURATION_ERROR",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            details=details,
+        )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Register custom exception handlers on the FastAPI application."""
 

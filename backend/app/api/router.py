@@ -5,14 +5,23 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.api import conversations, investigations, risk, transactions
+from app.api import auth, conversations, investigations, risk, transactions
+from app.api.auth import get_current_operator
 from app.core.config import Settings, get_settings
 
 router = APIRouter(prefix="/api/v1", tags=["API v1"])
-router.include_router(transactions.router)
-router.include_router(risk.router)
-router.include_router(investigations.router)
-router.include_router(conversations.router)
+
+# Public: authentication (login issues the token used for every other route).
+router.include_router(auth.router)
+
+# Operator-only: every operations-console router requires an authenticated
+# operator. Applying the dependency at include time uniformly gates all routes
+# (including the previously unscoped /conversations/{id} routes).
+_operator_only = [Depends(get_current_operator)]
+router.include_router(transactions.router, dependencies=_operator_only)
+router.include_router(risk.router, dependencies=_operator_only)
+router.include_router(investigations.router, dependencies=_operator_only)
+router.include_router(conversations.router, dependencies=_operator_only)
 
 
 class ApiInfoResponse(BaseModel):

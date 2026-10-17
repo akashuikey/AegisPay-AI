@@ -4,6 +4,7 @@
  */
 
 import { config } from '../config';
+import { apiFetch } from './authApi';
 
 export type FindingCategory =
   | 'AUTHORITY_COERCION'
@@ -126,7 +127,7 @@ export async function investigateTransactionApi(
   request: InvestigateTransactionRequest
 ): Promise<InvestigationResponse> {
   const url = `${config.apiBaseUrl}/api/v1/investigations`;
-  const response = await fetch(url, {
+  const response = await apiFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
@@ -147,7 +148,7 @@ export async function getInvestigationApi(
   investigationId: string
 ): Promise<InvestigationResponse> {
   const url = `${config.apiBaseUrl}/api/v1/investigations/${investigationId}`;
-  const response = await fetch(url);
+  const response = await apiFetch(url);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -164,7 +165,7 @@ export async function fetchInvestigationsForTransactionApi(
   transactionId: string
 ): Promise<InvestigationListResponse> {
   const url = `${config.apiBaseUrl}/api/v1/transactions/${transactionId}/investigations`;
-  const response = await fetch(url);
+  const response = await apiFetch(url);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -238,7 +239,7 @@ export async function startInvestigationConversationApi(
   request?: StartConversationRequest
 ): Promise<InvestigationConversationResponse> {
   const url = `${config.apiBaseUrl}/api/v1/transactions/${transactionId}/conversations`;
-  const response = await fetch(url, {
+  const response = await apiFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request ?? {}),
@@ -259,7 +260,7 @@ export async function getCurrentConversationForTransactionApi(
   transactionId: string
 ): Promise<InvestigationConversationResponse | null> {
   const url = `${config.apiBaseUrl}/api/v1/transactions/${transactionId}/conversations/current`;
-  const response = await fetch(url);
+  const response = await apiFetch(url);
 
   if (response.status === 404) {
     return null;
@@ -285,7 +286,7 @@ export async function submitConversationTurnApi(
     ? `${config.apiBaseUrl}/api/v1/transactions/${transactionId}/conversations/${conversationId}/turns`
     : `${config.apiBaseUrl}/api/v1/conversations/${conversationId}/turns`;
 
-  const response = await fetch(url, {
+  const response = await apiFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
