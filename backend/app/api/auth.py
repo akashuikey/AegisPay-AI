@@ -10,13 +10,14 @@ import secrets
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Security
+from fastapi import APIRouter, Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.errors import AuthenticationError
+from app.core.errors import AuthenticationError, RateLimitError
 from app.core.logging import get_logger
+from app.core.rate_limit import login_rate_limiter
 from app.core.security import (
     create_access_token,
     decode_access_token,
@@ -84,10 +85,22 @@ async def get_current_operator(
 )
 async def login(
     request: LoginRequest,
+    http_request: Request,
     repository: Annotated[OperatorRepository, Depends(get_operator_repository)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> TokenResponse:
     """Authenticate an operator and return a signed access token."""
+    # Bounded per-client (IP) throttle. Keyed by source IP, never by username, so
+    # it cannot be weaponized to lock out a specific account.
+    client_key = http_request.client.host if http_request.client else "unknown"
+    if not login_rate_limiter.check_and_record(
+        client_key,
+        settings.AUTH_LOGIN_MAX_ATTEMPTS_PER_WINDOW,
+        settings.AUTH_LOGIN_WINDOW_SECONDS,
+    ):
+        logger.warning("Login throttled for client=%s", client_key)
+        raise RateLimitError("Too many login attempts; please wait and try again")
+
     operator = await repository.get_by_username(request.username)
     # Verify against a real bcrypt hash in both branches so the request performs
     # equivalent work whether or not the account exists (no enumeration via timing).

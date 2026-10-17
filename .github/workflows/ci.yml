@@ -12,8 +12,34 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend Lint, Typecheck & Tests
+    name: Backend Lint, Typecheck, Migrations & Tests
     runs-on: ubuntu-latest
+
+    # Disposable PostgreSQL service. The integration test suite connects to the
+    # database named below; test_settings() hardcodes POSTGRES_DB=test_aegispay
+    # and reads host/port/user/password from the environment set on this job.
+    services:
+      postgres:
+        image: postgres:16.8-alpine
+        env:
+          POSTGRES_USER: aegispay_user
+          POSTGRES_PASSWORD: aegispay_dev_pw
+          POSTGRES_DB: test_aegispay
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aegispay_user -d test_aegispay"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: aegispay_user
+      POSTGRES_PASSWORD: aegispay_dev_pw
+      POSTGRES_DB: test_aegispay
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,12 +68,19 @@ jobs:
         working-directory: backend
         run: uv run mypy app
 
+      - name: Verify migrations (upgrade -> downgrade -> re-upgrade) on a clean database
+        working-directory: backend
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
       - name: Run pytest Suite
         working-directory: backend
         run: uv run pytest
 
   frontend:
-    name: Frontend Lint, Typecheck & Tests
+    name: Frontend Lint, Typecheck, Tests & Build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

@@ -791,6 +791,31 @@
 
 ---
 
+#### Task P2-A9: Reliability, Security & Demo Readiness
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer
+- **Status**: `DONE`
+- **Objective**: Harden P2-A1..P2-A8 via targeted security review, concurrency/failure testing, migration verification, CI alignment, and a repeatable demo. Reliability milestone only — no new feature/engine/agent. All outcomes remain simulated.
+- **Confirmed defects fixed**:
+  1. **CI could not run integration tests** — the backend CI job had no PostgreSQL service, so every DB-backed integration test would fail on GitHub Actions. `.github/workflows/ci.yml` now provisions a disposable `postgres:16.8-alpine` service (DB `test_aegispay`, matching creds/env), adds a migration upgrade→downgrade→re-upgrade step, and keeps the frontend job's lint/typecheck/test/build.
+- **Hardening added (bounded, testable)**:
+  2. **Login throttling** — `app/core/rate_limit.py` `SlidingWindowRateLimiter` + `login_rate_limiter`; `/auth/login` is throttled per **client IP** (never per username, so no account-lockout DoS), returning `429 RATE_LIMIT_EXCEEDED`. Configurable via `AUTH_LOGIN_MAX_ATTEMPTS_PER_WINDOW` (default 10) / `AUTH_LOGIN_WINDOW_SECONDS` (default 60); `0` disables. In-process speed bump (documented limitation: per-process, resets on restart).
+  3. **Dev-OTP exposure constrained outside dev/test** — `Settings` `model_validator` forces `VERIFICATION_EXPOSE_DEV_OTP=False` unless `APP_ENV` ∈ {development, dev, local, test, testing, ci}. Fail-safe; cannot leak the simulated OTP in a production-like environment.
+- **Verified existing invariants (no code change needed, now regression-covered)**: operator vs customer token types cannot be substituted (distinct `type` claims); a customer token for transaction A cannot access transaction B; AI provider timeout/malformed output never downgrades a risky transaction to ALLOW (deterministic baseline stands); explicit live-provider mode never silently falls back to mock; successful OTP + strong coercion stays held; voice stress alone never holds/blocks; stale decision rejected (`STALE_DECISION`); duplicate response/notification prevented by unique constraints; scenario expectation never overrides the observed outcome; a failed mandatory scenario stage never reports workflow success.
+- **New tests**: `tests/unit/test_rate_limit.py` (4), `tests/unit/test_config_security.py` (4), `tests/integration/test_reliability_hardening.py` (9 — login throttle, cross-transaction customer token, operator↔customer token substitution, live-provider missing-credential degradation, scenario partial-failure integrity, duplicate-response single-record, stale decision, observed-outcome authority). Total backend tests: **293**.
+- **Demo readiness**: `backend/scripts/smoke_test.py` (stdlib-only; health → login → catalogue → 1 fraud + 1 legitimate scenario; never prints secrets); Makefile `smoke` and `db-verify-migrations` (disposable DB) targets; README "Demo Runbook (Scenario Lab)" with mock-vs-live explanation, walkthrough, dev-OTP instructions, and a troubleshooting table; `.env.example` updated with the login-throttle settings and the dev-OTP constraint note.
+- **Verification Commands & Results**:
+  ```bash
+  make check-all                 # exit 0: backend 293 passed, frontend 51 passed, lint/typecheck/build green
+  # Migration integrity on a DISPOSABLE database (dev DB untouched):
+  make db-verify-migrations      # upgrade head -> downgrade base -> re-upgrade head, single head 0012, OK
+  # End-to-end smoke test against a running server on a disposable DB:
+  make smoke                     # all checks PASS (health, login, catalogue, fraud->hold, legit->settled)
+  ```
+  CI workflow validated to parse and provision the Postgres service + migration step; GitHub Actions result not observed from this environment (reported honestly, not claimed green).
+- **Known limitations / unresolved risks**: login throttle is per-process/in-memory (not a distributed edge limiter); no penetration testing performed; no calibrated fraud-detection accuracy or external-provider reliability claimed; HTTPS/TLS, per-environment `CORS_ORIGINS`, and a strong `AUTH_JWT_SECRET` remain deployment responsibilities; not production-ready.
+
+---
+
 ### Phase 3: Customer Portal & Dynamic Intervention UI
 - **Task P3-A1**: Simulated Banking Customer Payment Flow & Dynamic Intervention UI (`NOT_STARTED`)
 

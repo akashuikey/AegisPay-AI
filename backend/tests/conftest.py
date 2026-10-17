@@ -89,6 +89,14 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest.fixture(autouse=True)
+def reset_login_rate_limiter() -> None:
+    """Clear the in-process login throttle so its state never leaks across tests."""
+    from app.core.rate_limit import login_rate_limiter
+
+    login_rate_limiter.reset()
+
+
+@pytest.fixture(autouse=True)
 async def clean_database_after_test() -> AsyncGenerator[None, None]:
     """Clean all table rows after each test run to ensure strict isolation."""
     yield

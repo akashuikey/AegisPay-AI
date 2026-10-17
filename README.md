@@ -153,7 +153,98 @@ make frontend-build      # Build production frontend bundle
 
 ---
 
-## 5. Security & Sensitive Data Guidelines
+## 5. Demo Runbook (Scenario Lab)
+
+This reproduces the end-to-end demo on a clean machine. All outcomes are simulated.
+
+### 5.1 One-time setup
+
+```bash
+cp .env.example .env
+# For the local demo, enable the dev-only OTP display so the verification flow is
+# completable. This is automatically ignored outside development/test environments.
+#   APP_ENV=development
+#   VERIFICATION_EXPOSE_DEV_OTP=true
+#   AUTH_BOOTSTRAP_OPERATOR_USERNAME=operator
+#   AUTH_BOOTSTRAP_OPERATOR_PASSWORD=<choose-a-local-password>
+```
+
+> The default `POSTGRES_PORT` is `5432`. If `5432` is already in use locally, set
+> `POSTGRES_PORT=5433` in `.env` (Docker Compose and the backend both read it).
+
+### 5.2 Start everything
+
+```bash
+docker compose up -d db                 # PostgreSQL 16 (bound to 127.0.0.1 only)
+cd backend && uv sync --dev
+uv run alembic upgrade head             # apply migrations
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+# in a second terminal:
+cd frontend && npm install && npm run dev
+```
+
+On startup the backend provisions the bootstrap operator from
+`AUTH_BOOTSTRAP_OPERATOR_USERNAME` / `_PASSWORD`. Log in at
+[http://localhost:5173](http://localhost:5173) with those credentials.
+
+### 5.3 Smoke test (validates health + essential demo endpoints)
+
+```bash
+# backend must be running; reads operator creds from AUTH_BOOTSTRAP_OPERATOR_* or SMOKE_OPERATOR_*
+make smoke
+```
+
+It checks liveness/readiness, logs in, lists the scenario catalogue, and runs one
+fraud scenario (expects a protective hold) and one legitimate scenario (expects a
+simulated settlement). It never prints secrets or OTP values.
+
+### 5.4 Mock/deterministic vs live-provider mode
+
+- **Deterministic (mock)** — the default for the Scenario Lab. Uses an offline mock
+  AI provider so runs are reproducible and need no credentials. Recommended for demos.
+- **Live provider** — explicitly selected per run. Uses the configured Google
+  Gemini / Vertex AI provider (`AI_PROVIDER`, `GCP_PROJECT_ID` or `GEMINI_API_KEY`).
+  If credentials are missing, the AI stages are reported `UNAVAILABLE` and the
+  deterministic policy still applies — the system never silently falls back to mock.
+
+### 5.5 Scenario Lab walkthrough
+
+1. Sign in, then open the **Scenario Lab** tab in the console.
+2. Keep **Execution mode = Deterministic** and run **Digital Arrest / Authority
+   Impersonation**. Expected: a protective hold (`HELD_FOR_VERIFICATION`,
+   `HOLD_PROTECTIVE`), coercion analysis completed, and an expected-vs-actual
+   **MATCH**.
+3. Run **Legitimate High-Value Lease Payment**. Expected: simulated settlement
+   (`SETTLED_SIMULATED`, `ALLOW_SETTLED`) and a **MATCH** — a legitimate transfer is
+   not treated as fraud.
+4. Inspect the timeline for stage states, evidence references, and the clear
+   distinction between *workflow executed successfully* and *decision matched the
+   expectation*.
+
+### 5.6 Verify database migration integrity (disposable DB)
+
+```bash
+# Creates aegispay_migcheck, runs upgrade -> downgrade -> re-upgrade, then drops it.
+make db-verify-migrations
+```
+
+This never touches your development database.
+
+### 5.7 Troubleshooting
+
+| Symptom | Likely cause & fix |
+| :--- | :--- |
+| `/health/ready` returns 503 | Database not up or wrong port. `docker compose ps`; ensure `POSTGRES_PORT` in `.env` matches the mapped port. |
+| `AUTH_CONFIGURATION_ERROR` / cannot log in | `AUTH_JWT_SECRET` is empty. Set a long random value in `.env`. |
+| Login succeeds but console is empty / 401 loops | Token expired; log in again. Check the browser points `VITE_API_BASE_URL` at the backend. |
+| `alembic upgrade` fails | Confirm the DB is reachable and `POSTGRES_*` are correct; run `make db-verify-migrations` on a disposable DB to isolate schema issues. |
+| OTP not shown in the verification demo | Set `APP_ENV=development` and `VERIFICATION_EXPOSE_DEV_OTP=true`. It is force-disabled in non-dev environments. |
+| Live-provider scenario shows AI stages `UNAVAILABLE` | No Gemini/Vertex credentials configured. Use Deterministic mode or set `GCP_PROJECT_ID`/`GEMINI_API_KEY`. |
+| Frontend cannot reach backend | Set `VITE_API_BASE_URL` (default `http://127.0.0.1:8000`) and confirm CORS `CORS_ORIGINS` includes the frontend origin. |
+
+---
+
+## 6. Security & Sensitive Data Guidelines
 
 - All backend secrets and database passwords are loaded exclusively through environment variables.
 - Raw exception traces and internal details are never leaked in API error responses.

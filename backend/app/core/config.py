@@ -4,8 +4,11 @@ import json
 from functools import lru_cache
 from typing import Any
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Environments where development-only conveniences (e.g. OTP display) are allowed.
+_NON_PRODUCTION_ENVS = frozenset({"development", "dev", "local", "test", "testing", "ci"})
 
 
 class Settings(BaseSettings):
@@ -53,6 +56,11 @@ class Settings(BaseSettings):
     # Optional bootstrap operator provisioned on startup for local dev / demo login.
     AUTH_BOOTSTRAP_OPERATOR_USERNAME: str | None = None
     AUTH_BOOTSTRAP_OPERATOR_PASSWORD: str | None = None
+    # Bounded, per-client (IP) sliding-window throttle on /auth/login. Keyed by IP
+    # (never by username) so it cannot be abused to lock a specific account. Set
+    # the max to 0 to disable. This is an in-process speed bump, not an edge limiter.
+    AUTH_LOGIN_MAX_ATTEMPTS_PER_WINDOW: int = 10
+    AUTH_LOGIN_WINDOW_SECONDS: int = 60
 
     # Dedicated secret for HMAC-SHA256 OTP hashing (SEC-05 key separation).
     # If None, securely falls back to AUTH_JWT_SECRET with fail-closed behavior.
@@ -73,6 +81,22 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def constrain_dev_only_flags(self) -> "Settings":
+        """Force development-only conveniences off outside dev/test environments.
+
+        ``VERIFICATION_EXPOSE_DEV_OTP`` reveals the simulated OTP in API responses
+        purely to make the local demo completable. It must never be on in a
+        production-like environment, so it is coerced to False there (fail safe)
+        regardless of the supplied value.
+        """
+        if (
+            self.VERIFICATION_EXPOSE_DEV_OTP
+            and self.APP_ENV.strip().lower() not in _NON_PRODUCTION_ENVS
+        ):
+            object.__setattr__(self, "VERIFICATION_EXPOSE_DEV_OTP", False)
+        return self
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

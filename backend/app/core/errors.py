@@ -219,6 +219,22 @@ class AuthenticationError(AppException):
         )
 
 
+class RateLimitError(AppException):
+    """Raised when a client exceeds a bounded request rate (HTTP 429)."""
+
+    def __init__(
+        self,
+        message: str = "Too many requests; please slow down and retry shortly",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code="RATE_LIMIT_EXCEEDED",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            details=details,
+        )
+
+
 class AuthConfigurationError(AppException):
     """Raised when authentication is required but the server is not configured for it."""
 

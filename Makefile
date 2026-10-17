@@ -1,6 +1,6 @@
 export PATH := $(HOME)/.local/bin:$(PATH)
 
-.PHONY: help setup db-up db-down db-logs backend-install backend-migrate backend-dev backend-test backend-lint backend-format backend-typecheck frontend-install frontend-dev frontend-test frontend-lint frontend-typecheck frontend-build check-all
+.PHONY: help setup db-up db-down db-logs backend-install backend-migrate backend-dev backend-test backend-lint backend-format backend-typecheck frontend-install frontend-dev frontend-test frontend-lint frontend-typecheck frontend-build check-all smoke db-verify-migrations
 
 help:
 	@echo "AegisPay AI - Development Commands"
@@ -23,6 +23,8 @@ help:
 	@echo "  frontend-typecheck  Run TypeScript compiler check"
 	@echo "  frontend-build      Build production frontend bundle"
 	@echo "  check-all           Run all linting, typechecking, and tests"
+	@echo "  smoke               Run the demo smoke test against a running backend"
+	@echo "  db-verify-migrations Verify upgrade/downgrade/re-upgrade on a disposable DB"
 
 setup:
 	@if [ ! -f .env ]; then cp .env.example .env; echo "Created .env from .env.example"; fi
@@ -80,3 +82,16 @@ frontend-build:
 	cd frontend && npm run build
 
 check-all: backend-lint backend-typecheck backend-test frontend-lint frontend-typecheck frontend-test frontend-build
+
+smoke:
+	cd backend && uv run python -I scripts/smoke_test.py
+
+db-verify-migrations:
+	@echo "Verifying migrations on a DISPOSABLE database (aegispay_migcheck)..."
+	-docker compose exec -T db dropdb --if-exists -U $${POSTGRES_USER:-aegispay_user} aegispay_migcheck
+	docker compose exec -T db createdb -U $${POSTGRES_USER:-aegispay_user} aegispay_migcheck
+	cd backend && POSTGRES_DB=aegispay_migcheck uv run alembic upgrade head
+	cd backend && POSTGRES_DB=aegispay_migcheck uv run alembic downgrade base
+	cd backend && POSTGRES_DB=aegispay_migcheck uv run alembic upgrade head
+	docker compose exec -T db dropdb -U $${POSTGRES_USER:-aegispay_user} aegispay_migcheck
+	@echo "Migration verification complete (disposable DB dropped)."
