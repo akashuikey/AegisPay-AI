@@ -41,13 +41,14 @@
 ## 3. Current Milestone & Status
 
 - **Current Milestone**: Phase 2 — AI Investigation Agent & Multi-Modal Context Analysis (`IN_PROGRESS`).
-- **Active Task**: P2-A1 complete. Ready for P2-A2 kickoff upon user directive.
+- **Active Task**: P2-A2 complete. Ready for next Phase 2/3 task upon user directive.
 - **Completed Tasks**:
   - **P1-A1**: Repository foundation, FastAPI backend, Aster Bank frontend prototype preservation, PostgreSQL Docker Compose, Alembic baseline, and health probes.
   - **P1-A2**: 10-state transaction workflow state machine (`INITIATED`, `ASSESSING`, `RISK_ASSESSED`, `DECISION_READY`, `VERIFICATION_REQUIRED`, `HELD_FOR_VERIFICATION`, `INVESTIGATING`, `HUMAN_REVIEW`, `SETTLED_SIMULATED`, `CANCELLED_SIMULATED`), SQLAlchemy models (`TransactionModel`, `TransactionAuditModel`), Alembic migration `0002_create_transactions_and_audits`, transaction repository with optimistic concurrency locking and customer-scoped idempotency, transaction service, Pydantic v2 schemas, REST endpoints (`/api/v1/transactions`), 63 pytest unit/integration tests, and full test isolation on `test_aegispay`.
   - **P1-A3**: Deterministic Risk Engine & Scenario-Driven Assessment. Pure domain evaluation with 11 explainable rules; mandatory guardrails (coercion overrides trusted beneficiary, voice stress is advisory only, missing evidence explicitly tagged as unknown); benchmark scenario fixtures for all 6 demo fraud scenarios; `transaction_assessments` database table with Alembic migration `0003_create_transaction_assessments`; `RiskService` with atomic lifecycle transitions (`INITIATED` -> `ASSESSING` -> `RISK_ASSESSED` -> `DECISION_READY`) and audit trail; REST endpoints `POST /api/v1/risk/evaluate`, `GET /api/v1/risk/scenarios`, `POST /api/v1/transactions/{id}/assess`, and `GET /api/v1/transactions/{id}/assessment`; frontend Aster Bank integration with risk score column, scenario switcher, and dedicated Risk Assessment drawer tab; 100% green test suite (78 backend tests, 9 Vitest frontend tests).
   - **P1-A4**: Risk Engine Verification and Demo Readiness. Verified all 6 scenario fixtures with explainable scores, rules, missing telemetry, and policy actions; confirmed active-call and voice-stress alone never block; verified coercion overrides trusted recipient; confirmed ambiguous signals remain unblocked; clearly separated live backend evaluations (`source: 'backend'`, green pill) from demo fallback (`source: 'demo_fallback'`, amber pill and warning banner); verified clean database migrations (`0001` -> `0002` -> `0003`); added tests for repeated assessments, full transition lifecycle with atomic audits, optimistic locking, and simulated-only state boundaries; 94 total tests (84 backend, 10 frontend) passing with zero failures.
   - **P2-A1**: Gemini-Powered AI Investigation Service & Verification. Integrated official `google-genai` SDK (v2.31.0) with Python 3.14 compatibility; built domain models (`FindingCategory`, `RiskSentiment`, `ConfidenceLevel`, `EvidenceProvenance`), hardened prompt generation with strict anti-prompt-injection fences (`<untrusted_customer_statements>`, `<untrusted_extracted_documents>`), and operational guardrails; created `TransactionInvestigationModel` with Alembic migration `0004_create_transaction_investigations`; implemented `InvestigationService` with comprehensive evidence integrity validation, provenance allowlists, ungrounded fallback to `model_inference`, and anti-injection non-malice invariant; AI client abstraction (`VertexGeminiClient`, `MockGeminiClient`) with configurable `AI_PROVIDER` (`auto`, `vertex_ai`, `gemini_api`, `mock`); exposed REST endpoints (`POST /api/v1/investigations`, `GET /api/v1/investigations/{id}`, `GET /api/v1/transactions/{id}/investigations`); created typed frontend API client (`frontend/src/api/investigationApi.ts`); verified clean database migrations and failure isolation; 121 total tests (111 backend, 10 frontend) passing with zero failures.
+  - **P2-A2**: Bounded Multi-Turn Investigation Conversation. Built conversational forensic dialogue layer over existing Gemini and Mock infrastructure; persistent tables `investigation_conversations` and `investigation_conversation_turns` with Alembic migration `0005_create_investigation_conversations`; optimistic concurrency locking on conversation `version`; bounded to 20 turns (`INVESTIGATION_MAX_CONVERSATION_TURNS`) raising HTTP 400 `CONVERSATION_TURN_LIMIT_EXCEEDED`; non-mutating invariant verified (transaction state, version, and audit records remain 100% untouched); cross-transaction isolation enforced (`conversation.transaction_id == transaction_id`); non-repeating targeted follow-up questions; frontend `InvestigationConversationPanel` mounted in `TransactionDrawer` under `'AI Investigation'` tab with turn history, provider badge, risk sentiment, clickable inquiry chips, input composer, and non-mutation advisory; 132 total tests (118 backend, 14 frontend) passing with zero failures.
 
 ---
 
@@ -65,6 +66,12 @@
   - **Primacy of Deterministic Policies**: The LLM investigates evidence and produces intelligence; it **never** mutates transaction state or bypasses the deterministic state machine.
   - **Evidence Integrity & Provenance Grounding**: Every finding cites concrete evidence references validated against supplied inputs (`stmt_*`, `doc_*`, telephony telemetry, recipient flags, triggered rules). Fabricated/unknown references are rejected and tracked in `missing_information`. Findings with empty or ungrounded evidence references default to `EvidenceProvenance.MODEL_INFERENCE`.
   - **Prompt Injection Defense & Non-Malice Invariant**: Customer statements and document text are treated as untrusted data inside explicit forensic tags (`<untrusted_customer_statements>`, `<untrusted_extracted_documents>`), never as instructions. Adversarial overrides are detected and flagged under `FindingCategory.SOCIAL_ENGINEERING`. Prompt injection in untrusted customer text is treated as manipulation, NEVER as proof of customer malice (`MALICIOUS`).
+  - **Multi-Turn Investigation Dialogue Invariants (P2-A2)**:
+    - Bounded to `INVESTIGATION_MAX_CONVERSATION_TURNS = 20`. Exceeding limit raises HTTP 400 `ConversationTurnLimitError`.
+    - Strict cross-transaction isolation: any access or turn addition to a conversation associated with a mismatched transaction ID immediately yields HTTP 404 `RESOURCE_NOT_FOUND`.
+    - Transaction State & Audit Invariance: Conversation initialization and turn submissions execute inside independent transactional boundaries without altering transaction `state`, `version`, or appending to `transaction_audits`.
+    - Contextual Memory & Anti-Repetition: Assistant turns analyze complete prior turn history and generate distinct, decision-relevant follow-up prompts that omit inquiries already resolved.
+    - Idempotency & Concurrency: Client turns support optional `client_turn_id` idempotency token; conversation updates verify optimistic locking version increment.
   - **Provider Selection & Credential Transparency**: Controlled via `AI_PROVIDER` setting (`auto`, `vertex_ai`, `gemini_api`, `mock`). Metadata explicitly reports `"mock_gemini"` vs `"vertex_ai"`; mock outputs are never misrepresented as live AI findings. Missing credentials on live providers raise HTTP 503 `AI_CONFIGURATION_ERROR`.
   - **Known Limitation / Blocker**: Endpoints currently lack authentication (JWT/session) and object-level authorization (IDOR/BOLA controls); documented as a deployment blocker for multi-user environments.
   - **Confidence Calibration**: Qualitative confidence score (0.0 to 1.0) reflects model assessment certainty, not calibrated statistical fraud probability.
@@ -73,13 +80,15 @@
 - **Audit Integrity**: Append-only `transaction_audits` recorded atomically in the same database transaction.
 - **Risk Assessment History**: Persisted in `transaction_assessments` table, retaining complete input snapshot, triggered rules, supporting evidence, and missing evidence.
 - **Investigation History**: Persisted in `transaction_investigations` table, linked to transactions and optional deterministic assessments (`ondelete="SET NULL"`).
+- **Conversation History**: Persisted in `investigation_conversations` and `investigation_conversation_turns` tables with foreign keys and cascaded lifecycle.
 
 ---
 
 ## 5. Next Phase / Tasks (Awaiting User Directive)
 
-- **Phase 2 Continuation**: Multi-Modal AI Investigation Agent & Coercion Voice Analysis.
-  - P2-A2: Real-time coercion detection & voice interview pipeline.
-  - P2-A3: Operator console AI investigation panel & simulation controls.
+- **Phase 2 Continuation**: Multi-Modal AI Investigation Agent & Voice Duress Analysis.
+  - P2-A3: Real-time voice interview / duress analysis integration.
+- **Phase 3**: Customer Portal & Dynamic Intervention UI.
+  - P3-A1: Simulated Banking Customer Payment Flow & Dynamic Intervention UI.
 
 

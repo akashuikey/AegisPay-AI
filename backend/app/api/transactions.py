@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.conversations import serialize_conversation_response
 from app.api.investigations import (
     _serialize_investigation_response,
     get_investigation_service,
@@ -13,7 +14,13 @@ from app.api.investigations import (
 from app.db.session import get_db_session
 from app.domain.risk_engine import RecommendedAction, RiskLevel
 from app.repositories.transaction_repository import TransactionRepository
-from app.schemas.investigation import InvestigationListResponse
+from app.schemas.investigation import (
+    AddConversationTurnRequest,
+    InvestigationConversationListResponse,
+    InvestigationConversationResponse,
+    InvestigationListResponse,
+    StartConversationRequest,
+)
 from app.schemas.risk import (
     AssessTransactionRequest,
     RiskAssessmentResponse,
@@ -258,3 +265,94 @@ async def list_transaction_investigations(
         total_entries=len(records),
         items=[_serialize_investigation_response(record) for record in records],
     )
+
+
+@router.post(
+    "/{transaction_id}/conversations",
+    response_model=InvestigationConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Start or resume investigation conversation",
+    description=(
+        "Initiates a new multi-turn AI investigation conversation for the transaction, "
+        "or resumes the active conversation if one already exists."
+    ),
+)
+async def start_or_get_transaction_conversation(
+    transaction_id: UUID,
+    request: StartConversationRequest,
+    response: Response,
+    service: Annotated[InvestigationService, Depends(get_investigation_service)],
+) -> InvestigationConversationResponse:
+    """Start a new investigation conversation or resume active one."""
+    existing = await service.repository.get_active_conversation_for_transaction(transaction_id)
+    record = await service.start_or_get_conversation(transaction_id, request)
+    if existing and existing.id == record.id and not request.initial_message:
+        response.status_code = status.HTTP_200_OK
+    return serialize_conversation_response(record)
+
+
+@router.get(
+    "/{transaction_id}/conversations/current",
+    response_model=InvestigationConversationResponse,
+    summary="Get current investigation conversation",
+    description=(
+        "Retrieve the active (or latest) multi-turn investigation conversation for a transaction."
+    ),
+)
+async def get_current_transaction_conversation(
+    transaction_id: UUID,
+    service: Annotated[InvestigationService, Depends(get_investigation_service)],
+) -> InvestigationConversationResponse:
+    """Fetch the active or latest conversation for a transaction."""
+    record = await service.repository.get_active_conversation_for_transaction(transaction_id)
+    if not record:
+        from app.core.errors import NotFoundError
+
+        raise NotFoundError(
+            f"No investigation conversation found for transaction '{transaction_id}'"
+        )
+    return serialize_conversation_response(record)
+
+
+@router.get(
+    "/{transaction_id}/conversations",
+    response_model=InvestigationConversationListResponse,
+    summary="List transaction conversations",
+    description="Retrieve all multi-turn investigation conversations recorded for a transaction.",
+)
+async def list_transaction_conversations(
+    transaction_id: UUID,
+    service: Annotated[InvestigationService, Depends(get_investigation_service)],
+) -> InvestigationConversationListResponse:
+    """Fetch all conversations for a transaction."""
+    records = await service.list_conversations_for_transaction(transaction_id)
+    return InvestigationConversationListResponse(
+        transaction_id=transaction_id,
+        total_entries=len(records),
+        items=[serialize_conversation_response(record) for record in records],
+    )
+
+
+@router.post(
+    "/{transaction_id}/conversations/{conversation_id}/turns",
+    response_model=InvestigationConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Submit turn to transaction conversation",
+    description=(
+        "Submit an operator message or customer evidence turn into a transaction's "
+        "investigation conversation."
+    ),
+)
+async def submit_transaction_conversation_turn(
+    transaction_id: UUID,
+    conversation_id: UUID,
+    request: AddConversationTurnRequest,
+    service: Annotated[InvestigationService, Depends(get_investigation_service)],
+) -> InvestigationConversationResponse:
+    """Submit a turn to conversation while enforcing transaction scoping."""
+    record = await service.submit_conversation_turn(
+        conversation_id=conversation_id,
+        request=request,
+        transaction_id=transaction_id,
+    )
+    return serialize_conversation_response(record)

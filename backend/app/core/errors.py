@@ -171,6 +171,38 @@ class AIConfigurationError(AppException):
         )
 
 
+class ConversationTurnLimitError(AppException):
+    """Raised when an investigation conversation exceeds the maximum configured turns."""
+
+    def __init__(
+        self,
+        message: str = "Investigation conversation turn limit exceeded",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code="CONVERSATION_TURN_LIMIT_EXCEEDED",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            details=details,
+        )
+
+
+class ConversationInactiveError(AppException):
+    """Raised when submitting turns to an inactive or closed conversation."""
+
+    def __init__(
+        self,
+        message: str = "Investigation conversation is closed or inactive",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code="CONVERSATION_INACTIVE",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            details=details,
+        )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Register custom exception handlers on the FastAPI application."""
 

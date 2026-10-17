@@ -31,7 +31,9 @@ export type EvidenceProvenance =
   | 'consortium_registry'
   | 'risk_engine'
   | 'historical_ledger'
-  | 'model_inference';
+  | 'model_inference'
+  | 'operator_note'
+  | 'ai_assistant';
 
 
 export interface CustomerStatementEvidence {
@@ -166,9 +168,135 @@ export async function fetchInvestigationsForTransactionApi(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Failed to fetch investigations for transaction ${transactionId} (${response.status}): ${errorText}`);
+    throw new Error(
+      `Failed to fetch investigations for transaction ${transactionId} (${response.status}): ${errorText}`
+    );
   }
 
   return (await response.json()) as InvestigationListResponse;
 }
+
+// -------------------------------------------------------------
+// Multi-Turn Investigation Conversation API (P2-A2)
+// -------------------------------------------------------------
+
+export type ConversationRole = 'operator' | 'assistant' | 'system';
+
+export interface ConversationTurnResponse {
+  id: string;
+  conversation_id: string;
+  turn_index: number;
+  role: ConversationRole;
+  content: string;
+  evidence_provenance?: EvidenceProvenance | null;
+  evidence_references: string[];
+  findings: InvestigationFindingResponse[];
+  risk_sentiment?: RiskSentiment | null;
+  confidence?: ConfidenceLevel | null;
+  confidence_score?: number | null;
+  missing_information: string[];
+  follow_up_questions: string[];
+  model_metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface InvestigationConversationResponse {
+  id: string;
+  transaction_id: string;
+  status: string;
+  turn_count: number;
+  version: number;
+  turns: ConversationTurnResponse[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InvestigationConversationListResponse {
+  transaction_id: string;
+  total_entries: number;
+  items: InvestigationConversationResponse[];
+}
+
+export interface StartConversationRequest {
+  initial_message?: string;
+  evidence_provenance?: EvidenceProvenance;
+  correlation_id?: string;
+}
+
+export interface AddConversationTurnRequest {
+  content: string;
+  evidence_provenance?: EvidenceProvenance;
+  client_turn_id?: string;
+  correlation_id?: string;
+}
+
+/**
+ * Starts a new investigation conversation for a transaction, or resumes an existing active one.
+ */
+export async function startInvestigationConversationApi(
+  transactionId: string,
+  request?: StartConversationRequest
+): Promise<InvestigationConversationResponse> {
+  const url = `${config.apiBaseUrl}/api/v1/transactions/${transactionId}/conversations`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request ?? {}),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to start conversation (${response.status}): ${errorText}`);
+  }
+
+  return (await response.json()) as InvestigationConversationResponse;
+}
+
+/**
+ * Retrieves the current active investigation conversation for a transaction, or null if none exists.
+ */
+export async function getCurrentConversationForTransactionApi(
+  transactionId: string
+): Promise<InvestigationConversationResponse | null> {
+  const url = `${config.apiBaseUrl}/api/v1/transactions/${transactionId}/conversations/current`;
+  const response = await fetch(url);
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to fetch current conversation (${response.status}): ${errorText}`);
+  }
+
+  return (await response.json()) as InvestigationConversationResponse;
+}
+
+/**
+ * Submits an operator turn or customer statement into an investigation conversation.
+ */
+export async function submitConversationTurnApi(
+  conversationId: string,
+  request: AddConversationTurnRequest,
+  transactionId?: string
+): Promise<InvestigationConversationResponse> {
+  const url = transactionId
+    ? `${config.apiBaseUrl}/api/v1/transactions/${transactionId}/conversations/${conversationId}/turns`
+    : `${config.apiBaseUrl}/api/v1/conversations/${conversationId}/turns`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to submit turn (${response.status}): ${errorText}`);
+  }
+
+  return (await response.json()) as InvestigationConversationResponse;
+}
+
 

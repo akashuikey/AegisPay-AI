@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str | None = None
     GEMINI_REQUEST_TIMEOUT_SECONDS: float = 30.0
     GEMINI_MAX_RETRIES: int = 2
+    INVESTIGATION_MAX_CONVERSATION_TURNS: int = 20
 
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),

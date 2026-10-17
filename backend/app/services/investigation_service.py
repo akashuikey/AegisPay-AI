@@ -4,18 +4,40 @@ import uuid
 from typing import Any
 from uuid import UUID
 
-from app.core.errors import NotFoundError
+from app.core.config import get_settings
+from app.core.errors import (
+    ConversationInactiveError,
+    ConversationTurnLimitError,
+    NotFoundError,
+)
 from app.core.logging import get_logger
-from app.db.models import TransactionInvestigationModel, TransactionModel
-from app.domain.investigation import EvidenceProvenance, FindingCategory, RiskSentiment
+from app.db.models import (
+    InvestigationConversationModel,
+    InvestigationConversationTurnModel,
+    TransactionAssessmentModel,
+    TransactionInvestigationModel,
+    TransactionModel,
+)
+from app.domain.investigation import (
+    ConversationRole,
+    ConversationStatus,
+    EvidenceProvenance,
+    FindingCategory,
+    RiskSentiment,
+)
 from app.domain.investigation_prompts import (
+    CONVERSATION_INVESTIGATION_SYSTEM_INSTRUCTION,
     INVESTIGATION_SYSTEM_INSTRUCTION,
+    build_conversation_investigation_prompt,
     build_investigation_prompt,
 )
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.investigation import (
+    AddConversationTurnRequest,
+    ConversationTurnStructuredOutput,
     InvestigateTransactionRequest,
     InvestigationStructuredOutput,
+    StartConversationRequest,
 )
 from app.services.ai_client import AIInvestigationClient
 from app.services.transaction_service import TransactionService
@@ -40,6 +62,7 @@ class InvestigationService:
         self.repository = repository
         self.transaction_service = transaction_service
         self.ai_client = ai_client
+        self.settings = get_settings()
 
     async def investigate_transaction(
         self, request: InvestigateTransactionRequest
@@ -361,3 +384,402 @@ class InvestigationService:
         # Ensure transaction exists
         await self.transaction_service.get_transaction(transaction_id)
         return await self.repository.list_investigations_for_transaction(transaction_id)
+
+    def _build_base_transaction_context(
+        self, tx: TransactionModel, assessment: TransactionAssessmentModel | None
+    ) -> dict[str, Any]:
+        """Format baseline transaction context dictionary for AI forensic prompts."""
+        return {
+            "transaction": {
+                "id": str(tx.id),
+                "customer_id": tx.customer_id,
+                "amount": str(tx.amount),
+                "currency": tx.currency,
+                "payment_rail": tx.payment_rail,
+                "recipient_name": tx.recipient_name,
+                "recipient_identifier": tx.recipient_identifier,
+                "purpose": tx.purpose,
+                "state": tx.state,
+            },
+            "deterministic_assessment": (
+                {
+                    "id": str(assessment.id),
+                    "risk_score": assessment.risk_score,
+                    "risk_level": assessment.risk_level,
+                    "recommended_action": assessment.recommended_action,
+                    "triggered_rules": assessment.triggered_rules,
+                    "missing_evidence": assessment.missing_evidence,
+                }
+                if assessment
+                else {}
+            ),
+        }
+
+    async def start_or_get_conversation(
+        self, transaction_id: UUID, request: StartConversationRequest
+    ) -> InvestigationConversationModel:
+        """Start a new multi-turn investigation conversation or return/resume existing active one.
+
+        Architectural Guardrails:
+        - Strict Transaction Isolation: Conversations are strictly bound to their transaction.
+        - Non-Mutation Invariant: Starting or updating an investigation conversation produces
+          forensic intelligence and NEVER mutates transaction state or audit log.
+        """
+        # 1. Verify transaction existence
+        tx = await self.transaction_service.get_transaction(transaction_id)
+
+        # 2. Check for active existing conversation
+        existing = await self.repository.get_active_conversation_for_transaction(transaction_id)
+        if existing and existing.status == ConversationStatus.ACTIVE.value:
+            if request.initial_message:
+                return await self.submit_conversation_turn(
+                    conversation_id=existing.id,
+                    request=AddConversationTurnRequest(
+                        content=request.initial_message,
+                        evidence_provenance=request.evidence_provenance,
+                        correlation_id=request.correlation_id,
+                    ),
+                    transaction_id=transaction_id,
+                )
+            return existing
+
+        # 3. Create new conversation record
+        conv_id = uuid.uuid4()
+        conv = InvestigationConversationModel(
+            id=conv_id,
+            transaction_id=transaction_id,
+            status=ConversationStatus.ACTIVE.value,
+            turn_count=0,
+            version=1,
+        )
+        saved_conv = await self.repository.create_conversation(conv)
+
+        # 4. Initialize first turn(s)
+        if request.initial_message:
+            # Operator provided initial customer statement or message: submit as turn 0
+            return await self.submit_conversation_turn(
+                conversation_id=saved_conv.id,
+                request=AddConversationTurnRequest(
+                    content=request.initial_message,
+                    evidence_provenance=request.evidence_provenance,
+                    correlation_id=request.correlation_id,
+                ),
+                transaction_id=transaction_id,
+            )
+
+        # 5. Otherwise, generate initial assistant case assessment and targeted inquiries
+        assessment = await self.repository.get_latest_assessment(transaction_id)
+        context = self._build_base_transaction_context(tx=tx, assessment=assessment)
+        initial_system_turn = {
+            "role": ConversationRole.SYSTEM.value,
+            "provenance": EvidenceProvenance.RISK_ENGINE.value,
+            "content": (
+                "Case opened by operator. Analyze transaction context and deterministic "
+                "risk profile. Provide preliminary forensic observations and targeted questions."
+            ),
+        }
+        prompt = build_conversation_investigation_prompt(
+            context, history=[], new_turn=initial_system_turn
+        )
+        output, metadata = await self.ai_client.generate_conversation_turn(
+            prompt=prompt,
+            system_instruction=CONVERSATION_INVESTIGATION_SYSTEM_INSTRUCTION,
+            correlation_id=request.correlation_id,
+        )
+
+        self._validate_and_sanitize_turn_integrity(output, tx=tx, conversation_history=[])
+
+        assistant_turn = InvestigationConversationTurnModel(
+            id=uuid.uuid4(),
+            conversation_id=saved_conv.id,
+            turn_index=0,
+            role=ConversationRole.ASSISTANT.value,
+            content=output.reply,
+            evidence_provenance=EvidenceProvenance.AI_ASSISTANT.value,
+            evidence_references=[
+                ref for f in output.findings for ref in f.supporting_evidence_references
+            ],
+            findings=[f.model_dump() for f in output.findings],
+            risk_sentiment=output.overall_risk_sentiment.value,
+            confidence=output.confidence.value,
+            confidence_score=output.confidence_score,
+            missing_information=output.missing_information,
+            follow_up_questions=output.follow_up_questions,
+            model_metadata={
+                "provider": metadata.provider,
+                "model_id": metadata.model_id,
+                "latency_ms": metadata.latency_ms,
+                "correlation_id": metadata.correlation_id,
+            },
+        )
+        await self.repository.create_conversation_turn(assistant_turn)
+        updated = await self.repository.update_conversation(
+            conversation_id=saved_conv.id,
+            turn_count=1,
+            current_version=saved_conv.version,
+        )
+        return updated
+
+    async def get_conversation(
+        self, conversation_id: UUID, transaction_id: UUID | None = None
+    ) -> InvestigationConversationModel:
+        """Fetch conversation by ID, enforcing cross-transaction boundary isolation."""
+        conv = await self.repository.get_conversation_by_id(conversation_id)
+        if not conv:
+            raise NotFoundError(
+                f"Investigation conversation with ID '{conversation_id}' was not found"
+            )
+
+        if transaction_id and conv.transaction_id != transaction_id:
+            logger.warning(
+                "Cross-transaction access rejected: conv=%s belongs to tx=%s, not %s",
+                conversation_id,
+                conv.transaction_id,
+                transaction_id,
+            )
+            raise NotFoundError(
+                f"Investigation conversation with ID '{conversation_id}' was not found "
+                f"for transaction '{transaction_id}'"
+            )
+        return conv
+
+    async def list_conversations_for_transaction(
+        self, transaction_id: UUID
+    ) -> list[InvestigationConversationModel]:
+        """Fetch all conversation sessions for a transaction."""
+        await self.transaction_service.get_transaction(transaction_id)
+        return await self.repository.list_conversations_for_transaction(transaction_id)
+
+    async def submit_conversation_turn(
+        self,
+        conversation_id: UUID,
+        request: AddConversationTurnRequest,
+        transaction_id: UUID | None = None,
+    ) -> InvestigationConversationModel:
+        """Submit an operator message or customer evidence turn into active conversation."""
+        # 1. Fetch conversation and enforce transaction isolation
+        conv = await self.get_conversation(conversation_id, transaction_id=transaction_id)
+
+        # 2. Check conversation active status
+        if conv.status != ConversationStatus.ACTIVE.value:
+            raise ConversationInactiveError(
+                f"Conversation '{conversation_id}' is {conv.status} and cannot accept new turns."
+            )
+
+        # 3. Check bounded turn limit
+        max_turns = self.settings.INVESTIGATION_MAX_CONVERSATION_TURNS
+        if conv.turn_count >= max_turns:
+            raise ConversationTurnLimitError(
+                f"Conversation '{conversation_id}' reached maximum turn limit of {max_turns}."
+            )
+
+        # 4. Fetch context
+        tx = await self.transaction_service.get_transaction(conv.transaction_id)
+        assessment = await self.repository.get_latest_assessment(conv.transaction_id)
+        context = self._build_base_transaction_context(tx=tx, assessment=assessment)
+
+        # 5. Format history for prompt
+        history_list = [
+            {
+                "role": t.role,
+                "provenance": t.evidence_provenance or EvidenceProvenance.CUSTOMER_STATEMENT.value,
+                "content": t.content,
+            }
+            for t in sorted(conv.turns, key=lambda t: t.turn_index)
+        ]
+
+        operator_turn_dict = {
+            "role": ConversationRole.OPERATOR.value,
+            "provenance": request.evidence_provenance.value,
+            "content": request.content,
+        }
+
+        prompt = build_conversation_investigation_prompt(
+            context=context,
+            history=history_list,
+            new_turn=operator_turn_dict,
+        )
+
+        # 6. Execute AI model call
+        output, metadata = await self.ai_client.generate_conversation_turn(
+            prompt=prompt,
+            system_instruction=CONVERSATION_INVESTIGATION_SYSTEM_INSTRUCTION,
+            correlation_id=request.correlation_id,
+        )
+
+        # 7. Validate and sanitize evidence integrity
+        self._validate_and_sanitize_turn_integrity(
+            output=output,
+            tx=tx,
+            conversation_history=conv.turns,
+            current_content=request.content,
+        )
+
+        # 8. Determine turn indexes
+        operator_turn_index = conv.turn_count
+        assistant_turn_index = operator_turn_index + 1
+        new_turn_count = assistant_turn_index + 1
+
+        # 9. Persist operator turn
+        operator_model_metadata: dict[str, Any] = {}
+        if request.client_turn_id:
+            operator_model_metadata["client_turn_id"] = request.client_turn_id
+
+        operator_turn = InvestigationConversationTurnModel(
+            id=uuid.uuid4(),
+            conversation_id=conv.id,
+            turn_index=operator_turn_index,
+            role=ConversationRole.OPERATOR.value,
+            content=request.content,
+            evidence_provenance=request.evidence_provenance.value,
+            evidence_references=[],
+            findings=[],
+            risk_sentiment=None,
+            confidence=None,
+            confidence_score=None,
+            missing_information=[],
+            follow_up_questions=[],
+            model_metadata=operator_model_metadata,
+        )
+        await self.repository.create_conversation_turn(operator_turn)
+
+        # 10. Persist assistant turn
+        assistant_turn = InvestigationConversationTurnModel(
+            id=uuid.uuid4(),
+            conversation_id=conv.id,
+            turn_index=assistant_turn_index,
+            role=ConversationRole.ASSISTANT.value,
+            content=output.reply,
+            evidence_provenance=EvidenceProvenance.AI_ASSISTANT.value,
+            evidence_references=[
+                ref for f in output.findings for ref in f.supporting_evidence_references
+            ],
+            findings=[f.model_dump() for f in output.findings],
+            risk_sentiment=output.overall_risk_sentiment.value,
+            confidence=output.confidence.value,
+            confidence_score=output.confidence_score,
+            missing_information=output.missing_information,
+            follow_up_questions=output.follow_up_questions,
+            model_metadata={
+                "provider": metadata.provider,
+                "model_id": metadata.model_id,
+                "latency_ms": metadata.latency_ms,
+                "correlation_id": metadata.correlation_id,
+            },
+        )
+        await self.repository.create_conversation_turn(assistant_turn)
+
+        # 11. Update conversation status and turn count
+        new_status = ConversationStatus.COMPLETED.value if new_turn_count >= max_turns else None
+        updated_conv = await self.repository.update_conversation(
+            conversation_id=conv.id,
+            turn_count=new_turn_count,
+            current_version=conv.version,
+            status=new_status,
+        )
+        return updated_conv
+
+    def _validate_and_sanitize_turn_integrity(
+        self,
+        output: ConversationTurnStructuredOutput,
+        tx: TransactionModel,
+        conversation_history: list[InvestigationConversationTurnModel],
+        current_content: str | None = None,
+    ) -> None:
+        """Validate multi-turn evidence references, provenance, and anti-injection non-malice."""
+        # 1. Compile allowlist of verified evidence references
+        valid_refs: set[str] = {
+            "transaction",
+            "transaction_id",
+            str(tx.id).lower(),
+            "amount",
+            "purpose",
+            "historical_ledger",
+            "ledger",
+            "conversation_context",
+            "customer_statement",
+            "telephony:screen_sharing_active",
+            "telephony:active_call_present",
+            "consortium_registry",
+            "untrusted_turn",
+        }
+
+        for turn in conversation_history:
+            valid_refs.add(f"turn_{turn.turn_index}")
+            valid_refs.add(str(turn.id).lower())
+
+        # 2. Validate finding references
+        for finding in output.findings:
+            sanitized_refs: list[str] = []
+            for ref in finding.supporting_evidence_references:
+                cleaned_ref = ref.strip().lower()
+                if (
+                    cleaned_ref in valid_refs
+                    or cleaned_ref.startswith("stmt_")
+                    or cleaned_ref.startswith("doc_")
+                ):
+                    sanitized_refs.append(ref)
+                else:
+                    msg = (
+                        f"Evidence reference '{ref}' in finding {finding.id} "
+                        "was not present in conversation input."
+                    )
+                    if msg not in output.missing_information:
+                        output.missing_information.append(msg)
+
+            finding.supporting_evidence_references = sanitized_refs
+
+            # Provenance validation
+            try:
+                provenance = EvidenceProvenance(finding.source_provenance)
+            except (ValueError, TypeError):
+                provenance = EvidenceProvenance.MODEL_INFERENCE
+
+            if (
+                not finding.supporting_evidence_references
+                and provenance != EvidenceProvenance.MODEL_INFERENCE
+            ):
+                provenance = EvidenceProvenance.MODEL_INFERENCE
+
+            finding.source_provenance = provenance
+
+        # 3. Anti-Prompt-Injection Non-Malice Invariant
+        has_injection_in_finding = any(
+            f.category == FindingCategory.SOCIAL_ENGINEERING
+            and any(
+                term in f.explanation.lower()
+                for term in ("injection", "override", "adversarial", "jailbreak")
+            )
+            for f in output.findings
+        )
+        has_injection_in_content = bool(
+            current_content
+            and any(
+                phrase in current_content.lower()
+                for phrase in (
+                    "ignore previous instructions",
+                    "ignore all instructions",
+                    "system override",
+                    "override all instructions",
+                )
+            )
+        )
+
+        if (
+            has_injection_in_finding or has_injection_in_content
+        ) and output.overall_risk_sentiment == RiskSentiment.MALICIOUS:
+            has_coercion = any(
+                f.category == FindingCategory.AUTHORITY_COERCION for f in output.findings
+            )
+            output.overall_risk_sentiment = (
+                RiskSentiment.COERCED if has_coercion else RiskSentiment.SUSPICIOUS
+            )
+            output.missing_information.append(
+                "Adversarial prompt injection pattern detected in untrusted turn; "
+                "neutralized as manipulation rather than proof of customer malice."
+            )
+            logger.info(
+                "Neutralized turn sentiment to %s for tx=%s due to prompt injection.",
+                output.overall_risk_sentiment,
+                tx.id,
+            )

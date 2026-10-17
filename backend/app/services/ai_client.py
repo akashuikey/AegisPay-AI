@@ -20,6 +20,7 @@ from app.domain.investigation import (
     RiskSentiment,
 )
 from app.schemas.investigation import (
+    ConversationTurnStructuredOutput,
     InvestigationFindingSchema,
     InvestigationStructuredOutput,
 )
@@ -37,6 +38,15 @@ class AIInvestigationClient(Protocol):
         correlation_id: str | None = None,
     ) -> tuple[InvestigationStructuredOutput, InvestigationModelMetadata]:
         """Generate structured forensic findings from context."""
+        ...
+
+    async def generate_conversation_turn(
+        self,
+        prompt: str,
+        system_instruction: str,
+        correlation_id: str | None = None,
+    ) -> tuple[ConversationTurnStructuredOutput, InvestigationModelMetadata]:
+        """Generate structured forensic response and findings for a multi-turn conversation."""
         ...
 
 
@@ -210,6 +220,137 @@ class VertexGeminiClient:
             status_code=503,
         )
 
+    async def generate_conversation_turn(
+        self,
+        prompt: str,
+        system_instruction: str,
+        correlation_id: str | None = None,
+    ) -> tuple[ConversationTurnStructuredOutput, InvestigationModelMetadata]:
+        """Execute Gemini model generation for conversation turn with structured JSON schema."""
+        client = self._get_client()
+        start_time = time.monotonic()
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema=ConversationTurnStructuredOutput,
+            temperature=0.1,
+        )
+
+        attempts = 0
+        last_error: Exception | None = None
+
+        while attempts <= self.max_retries:
+            attempts += 1
+            try:
+                logger.info(
+                    "Calling Gemini for turn model=%s (attempt %d/%d, correlation_id=%s)",
+                    self.model_id,
+                    attempts,
+                    self.max_retries + 1,
+                    correlation_id,
+                )
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=self.model_id,
+                        contents=prompt,
+                        config=config,
+                    ),
+                    timeout=self.timeout,
+                )
+
+                latency_ms = int((time.monotonic() - start_time) * 1000)
+                raw_text = response.text
+                if not raw_text:
+                    raise AIProviderError(
+                        message="Gemini model returned empty response for conversation turn",
+                        code="AI_EMPTY_RESPONSE",
+                        status_code=502,
+                    )
+
+                try:
+                    parsed_json = json.loads(raw_text)
+                    structured_output = ConversationTurnStructuredOutput.model_validate(parsed_json)
+                except Exception as parse_err:
+                    logger.error(
+                        "Failed to parse Gemini output into structured turn schema: %s",
+                        parse_err,
+                    )
+                    raise AIProviderError(
+                        message=("Model output did not match expected structured turn schema"),
+                        code="AI_PARSE_ERROR",
+                        status_code=502,
+                        details={"raw_output_snippet": raw_text[:500]},
+                    ) from parse_err
+
+                metadata = InvestigationModelMetadata(
+                    provider="vertex_ai" if self.settings.GCP_PROJECT_ID else "gemini_api",
+                    model_id=self.model_id,
+                    latency_ms=latency_ms,
+                    correlation_id=correlation_id,
+                )
+                return structured_output, metadata
+
+            except TimeoutError:
+                logger.warning("Gemini conversation turn timed out after %.1fs", self.timeout)
+                last_error = AIProviderError(
+                    message=f"AI investigation timed out after {self.timeout}s",
+                    code="AI_PROVIDER_TIMEOUT",
+                    status_code=504,
+                )
+            except errors.APIError as api_err:
+                err_code = getattr(api_err, "code", None)
+                err_msg = str(api_err)
+                logger.warning("Gemini API error during turn (code=%s): %s", err_code, err_msg)
+
+                if err_code == 429:
+                    raise AIProviderError(
+                        message="AI investigation rate limit or quota exceeded",
+                        code="AI_RATE_LIMIT_EXCEEDED",
+                        status_code=429,
+                    ) from api_err
+
+                if err_code == 403:
+                    raise AIProviderError(
+                        message=(
+                            "AI investigation permission denied or authentication failure "
+                            "with provider"
+                        ),
+                        code="AI_PERMISSION_DENIED",
+                        status_code=502,
+                    ) from api_err
+
+                if err_code in (500, 502, 503, 504) and attempts <= self.max_retries:
+                    backoff = 0.5 * (2 ** (attempts - 1))
+                    await asyncio.sleep(backoff)
+                    continue
+
+                last_error = AIProviderError(
+                    message="AI investigation provider encountered an error",
+                    code="AI_PROVIDER_ERROR",
+                    status_code=502,
+                )
+                break
+            except Exception as general_err:
+                if isinstance(general_err, (AIProviderError, AIConfigurationError)):
+                    raise
+                logger.error("Unexpected error during Gemini turn execution: %s", general_err)
+                last_error = AIProviderError(
+                    message="Unexpected error communicating with AI investigation provider",
+                    code="AI_PROVIDER_ERROR",
+                    status_code=502,
+                )
+                break
+
+        if last_error:
+            raise last_error
+
+        raise AIProviderError(
+            message="AI investigation failed after retries",
+            code="AI_PROVIDER_UNAVAILABLE",
+            status_code=503,
+        )
+
 
 class MockGeminiClient:
     """Configurable mock AI client for unit/integration tests and offline development."""
@@ -217,11 +358,13 @@ class MockGeminiClient:
     def __init__(
         self,
         default_output: InvestigationStructuredOutput | None = None,
+        default_conversation_output: ConversationTurnStructuredOutput | None = None,
         should_fail: bool = False,
         failure_exception: Exception | None = None,
         latency_ms: int = 45,
     ) -> None:
         self.default_output = default_output
+        self.default_conversation_output = default_conversation_output
         self.should_fail = should_fail
         self.failure_exception = failure_exception
         self.latency_ms = latency_ms
@@ -246,6 +389,35 @@ class MockGeminiClient:
             output = self.default_output
         else:
             output = self._synthesize_mock_output(prompt)
+
+        metadata = InvestigationModelMetadata(
+            provider="mock_gemini",
+            model_id="gemini-2.5-flash-mock",
+            latency_ms=self.latency_ms,
+            correlation_id=correlation_id,
+        )
+        return output, metadata
+
+    async def generate_conversation_turn(
+        self,
+        prompt: str,
+        system_instruction: str,
+        correlation_id: str | None = None,
+    ) -> tuple[ConversationTurnStructuredOutput, InvestigationModelMetadata]:
+        """Return predefined or dynamically synthesized conversation turn output."""
+        if self.should_fail:
+            if self.failure_exception:
+                raise self.failure_exception
+            raise AIProviderError(
+                message="Mocked AI provider failure",
+                code="AI_PROVIDER_ERROR",
+                status_code=502,
+            )
+
+        if self.default_conversation_output is not None:
+            output = self.default_conversation_output
+        else:
+            output = self._synthesize_mock_conversation_turn(prompt)
 
         metadata = InvestigationModelMetadata(
             provider="mock_gemini",
@@ -488,4 +660,328 @@ class MockGeminiClient:
             missing_information=missing,
             unresolved_questions=unresolved,
             suggested_next_steps=next_steps,
+        )
+
+    def _synthesize_mock_conversation_turn(self, prompt: str) -> ConversationTurnStructuredOutput:
+        """Synthesize dynamic multi-turn conversational findings and targeted questions."""
+        findings: list[InvestigationFindingSchema] = []
+        mitigating: list[str] = []
+        missing: list[str] = []
+        follow_up: list[str] = []
+
+        lower_prompt = prompt.lower()
+
+        # Extract statement and doc IDs for grounded evidence references
+        prompt_stmt_ids = re.findall(r"\[(stmt_[^\]]+)\]", prompt)
+        prompt_doc_ids = re.findall(r"\[(doc_[^\]]+)\]", prompt)
+        primary_stmt = prompt_stmt_ids[0] if prompt_stmt_ids else None
+        primary_doc = prompt_doc_ids[0] if prompt_doc_ids else None
+
+        # Check for adversarial prompt injection attempt in untrusted turn
+        if any(
+            phrase in lower_prompt
+            for phrase in (
+                "ignore previous instructions",
+                "ignore all instructions",
+                "ignore all previous instructions",
+                "system override",
+                "override all instructions",
+            )
+        ):
+            findings.append(
+                InvestigationFindingSchema(
+                    id="FINDING-ADVERSARIAL",
+                    category=FindingCategory.SOCIAL_ENGINEERING,
+                    explanation=(
+                        "Adversarial prompt injection pattern detected within untrusted "
+                        "conversation input. The input attempted to override investigator rules "
+                        "or transaction policies."
+                    ),
+                    severity="CRITICAL",
+                    supporting_evidence_references=[primary_stmt]
+                    if primary_stmt
+                    else ["untrusted_turn"],
+                    source_provenance=EvidenceProvenance.CUSTOMER_STATEMENT,
+                )
+            )
+
+        # Check for authority coercion / digital arrest cues
+        if (
+            "cbi" in lower_prompt
+            or "police" in lower_prompt
+            or "arrest" in lower_prompt
+            or "court" in lower_prompt
+            or "liquidat" in lower_prompt
+            or "screen sharing active: true" in lower_prompt
+            or "screen_sharing" in lower_prompt
+            or "digital arrest" in lower_prompt
+        ):
+            supporting_refs = []
+            if primary_stmt:
+                supporting_refs.append(primary_stmt)
+            if "screen sharing active: true" in lower_prompt:
+                supporting_refs.append("telephony:screen_sharing_active")
+            if not supporting_refs:
+                supporting_refs.append("conversation_context")
+
+            findings.append(
+                InvestigationFindingSchema(
+                    id="FINDING-COERCION",
+                    category=FindingCategory.AUTHORITY_COERCION,
+                    explanation=(
+                        "Customer narrative displays digital arrest markers: alleged legal "
+                        "coercion, law enforcement impersonation, or pressure to liquidate assets."
+                    ),
+                    severity="CRITICAL",
+                    supporting_evidence_references=supporting_refs,
+                    source_provenance=EvidenceProvenance.CUSTOMER_STATEMENT,
+                )
+            )
+
+        # Check for guaranteed return investment scam
+        if (
+            "guaranteed" in lower_prompt
+            or "crypto" in lower_prompt
+            or "daily return" in lower_prompt
+            or "investment" in lower_prompt
+        ):
+            findings.append(
+                InvestigationFindingSchema(
+                    id="FINDING-INVESTMENT-SCAM",
+                    category=FindingCategory.SOCIAL_ENGINEERING,
+                    explanation=(
+                        "Customer was lured with promises of unrealistic guaranteed investment "
+                        "returns and instructed to dismiss banking warnings."
+                    ),
+                    severity="HIGH",
+                    supporting_evidence_references=[primary_stmt]
+                    if primary_stmt
+                    else ["conversation_context"],
+                    source_provenance=EvidenceProvenance.CUSTOMER_STATEMENT,
+                )
+            )
+
+        # Check for invoice routing discrepancy
+        if (
+            "routing mismatch: true" in lower_prompt
+            or "payee name mismatch: true" in lower_prompt
+            or "routing / ifsc mismatch: true" in lower_prompt
+            or ("invoice" in lower_prompt and "mismatch" in lower_prompt)
+        ):
+            findings.append(
+                InvestigationFindingSchema(
+                    id="FINDING-INVOICE-DISCREPANCY",
+                    category=FindingCategory.BENEFICIARY_INCONSISTENCY,
+                    explanation=(
+                        "Submitted invoice routing details contradict historical "
+                        "vendor ledger records."
+                    ),
+                    severity="HIGH",
+                    supporting_evidence_references=[primary_doc]
+                    if primary_doc
+                    else ["conversation_context"],
+                    source_provenance=EvidenceProvenance.DOCUMENT_EXTRACTION,
+                )
+            )
+
+        # Check for mule accounts
+        if (
+            "flagged as known mule: true" in lower_prompt
+            or "known mule account" in lower_prompt
+            or "confirmed mule" in lower_prompt
+        ):
+            findings.append(
+                InvestigationFindingSchema(
+                    id="FINDING-MULE-REGISTRY",
+                    category=FindingCategory.MULE_VELOCITY,
+                    explanation=(
+                        "Beneficiary account matches consortium mule registry and "
+                        "rapid turnover profile."
+                    ),
+                    severity="CRITICAL",
+                    supporting_evidence_references=["consortium_registry"],
+                    source_provenance=EvidenceProvenance.CONSORTIUM_REGISTRY,
+                )
+            )
+
+        # Check for legitimate transfer
+        if "routine payment" in lower_prompt or "annual lease" in lower_prompt:
+            findings.append(
+                InvestigationFindingSchema(
+                    id="FINDING-LEGITIMATE",
+                    category=FindingCategory.LEGITIMATE_CONTEXT,
+                    explanation=(
+                        "Payment matches routine verified profile with "
+                        "established beneficiary relationship."
+                    ),
+                    severity="LOW",
+                    supporting_evidence_references=["historical_ledger"],
+                    source_provenance=EvidenceProvenance.HISTORICAL_LEDGER,
+                )
+            )
+            mitigating.append(
+                "Established payee relationship with prior verified transaction history."
+            )
+
+        # Determine sentiment, reply, and targeted follow-up questions
+        categories = {f.category for f in findings}
+
+        if any(f.id == "FINDING-ADVERSARIAL" for f in findings):
+            sentiment = (
+                RiskSentiment.COERCED
+                if FindingCategory.AUTHORITY_COERCION in categories
+                else RiskSentiment.SUSPICIOUS
+            )
+            confidence = ConfidenceLevel.HIGH
+            confidence_score = 0.90
+            reply = (
+                "Adversarial prompt injection attempt detected and safely quarantined. "
+                "The untrusted directive was neutralized into social engineering context "
+                "rather than customer malice."
+            )
+            follow_up.append(
+                "Did an external caller or message instruct the customer to type or paste "
+                "these specific phrases?"
+            )
+
+        elif FindingCategory.AUTHORITY_COERCION in categories:
+            sentiment = RiskSentiment.COERCED
+            # Multi-turn adaptation: check if operator/customer confirmed key coercion details
+            has_answered_disconnect = (
+                "do not disconnect" in lower_prompt
+                or "active call" in lower_prompt
+                or "kept on call" in lower_prompt
+            )
+            has_answered_safe_account = (
+                "safe reserve" in lower_prompt
+                or "safe account" in lower_prompt
+                or "police account" in lower_prompt
+            )
+
+            if has_answered_disconnect or has_answered_safe_account:
+                confidence = ConfidenceLevel.HIGH
+                confidence_score = 0.96
+                reply = (
+                    "Forensic analysis confirms high-probability authority coercion and "
+                    "digital arrest scam. Customer testimony verifies instructions to stay "
+                    "on continuous call and transfer funds under legal intimidation."
+                )
+                follow_up.append(
+                    "Has the customer been instructed to install remote desktop tools "
+                    "(e.g. AnyDesk, RustDesk)?"
+                )
+                follow_up.append(
+                    "Can the branch or anti-fraud desk initiate an immediate simulated "
+                    "voice duress intervention?"
+                )
+            else:
+                confidence = ConfidenceLevel.MEDIUM
+                confidence_score = 0.84
+                reply = (
+                    "Initial forensic analysis indicates strong signals of authority "
+                    "impersonation duress. Key coercive markers require follow-up verification."
+                )
+                follow_up.append(
+                    "Did the caller demand the customer maintain continuous audio/video connection?"
+                )
+                follow_up.append(
+                    "Did the caller state that funds must be transferred to a 'safe reserve "
+                    "account' for verification?"
+                )
+                follow_up.append(
+                    "Is the customer currently on an active call while attempting this transaction?"
+                )
+
+        elif FindingCategory.MULE_VELOCITY in categories:
+            sentiment = RiskSentiment.MALICIOUS
+            confidence = ConfidenceLevel.HIGH
+            confidence_score = 0.96
+            reply = (
+                "Forensic match: Beneficiary account appears on consortium mule registry with "
+                "high turnover velocity. High confidence malicious beneficiary."
+            )
+            follow_up.append(
+                "Has the beneficiary account been flagged across other partner institutions "
+                "in the last 24 hours?"
+            )
+
+        elif FindingCategory.BENEFICIARY_INCONSISTENCY in categories:
+            sentiment = RiskSentiment.SUSPICIOUS
+            confidence = ConfidenceLevel.HIGH
+            confidence_score = 0.86
+            reply = (
+                "Analysis indicates beneficiary routing discrepancy or potential business email "
+                "compromise (BEC). Account details do not align with known supplier history."
+            )
+            follow_up.append(
+                "Was the revised invoice received via an altered or lookalike email domain?"
+            )
+            follow_up.append(
+                "Has the operator verified the beneficiary bank details with the vendor via "
+                "an out-of-band phone call?"
+            )
+
+        elif FindingCategory.SOCIAL_ENGINEERING in categories:
+            sentiment = RiskSentiment.SUSPICIOUS
+            confidence = ConfidenceLevel.HIGH
+            confidence_score = 0.88
+            reply = (
+                "Forensic indicators point toward social engineering through an investment or "
+                "task scam with false promises."
+            )
+            follow_up.append(
+                "Where did the customer first encounter this investment opportunity "
+                "(e.g., WhatsApp, Telegram)?"
+            )
+            follow_up.append(
+                "Has the customer previously received any small withdrawal or refund to "
+                "build credibility?"
+            )
+
+        elif FindingCategory.LEGITIMATE_CONTEXT in categories:
+            sentiment = RiskSentiment.BENIGN
+            confidence = ConfidenceLevel.HIGH
+            confidence_score = 0.92
+            reply = (
+                "Forensic context is consistent with legitimate routine transaction behavior. "
+                "Established beneficiary profile verified."
+            )
+
+        else:
+            sentiment = RiskSentiment.UNKNOWN
+            confidence = ConfidenceLevel.MEDIUM
+            confidence_score = 0.50
+            reply = (
+                "Forensic context updated with operator inquiry. Evidence profile remains "
+                "ambiguous; additional verification recommended."
+            )
+            missing.append("Customer statement transcript")
+            follow_up.append("Can the customer confirm if they personally know the beneficiary?")
+            follow_up.append(
+                "Was the customer asked to keep this transaction confidential from family or "
+                "bank staff?"
+            )
+
+        # Filter out questions if their answer or key words were already mentioned in the prompt
+        filtered_questions = [
+            q
+            for q in follow_up
+            if not any(
+                keyword in lower_prompt
+                for keyword in ["do not disconnect", "remote desktop"]
+                if keyword in q.lower()
+            )
+        ]
+        if not filtered_questions and follow_up:
+            filtered_questions = follow_up[:1]
+
+        return ConversationTurnStructuredOutput(
+            reply=reply,
+            overall_risk_sentiment=sentiment,
+            confidence=confidence,
+            confidence_score=confidence_score,
+            findings=findings,
+            missing_information=missing,
+            follow_up_questions=filtered_questions,
+            contradictory_or_mitigating_evidence=mitigating,
         )

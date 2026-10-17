@@ -1,14 +1,18 @@
 """Repository for persistent transaction and audit operations."""
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.errors import ConcurrencyConflictError
 from app.core.logging import get_logger
 from app.db.models import (
+    InvestigationConversationModel,
+    InvestigationConversationTurnModel,
     TransactionAssessmentModel,
     TransactionAuditModel,
     TransactionInvestigationModel,
@@ -195,3 +199,110 @@ class TransactionRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def create_conversation(
+        self, conversation: InvestigationConversationModel
+    ) -> InvestigationConversationModel:
+        """Persist a new investigation conversation."""
+        self.session.add(conversation)
+        await self.session.commit()
+        await self.session.refresh(conversation)
+        return conversation
+
+    async def get_conversation_by_id(
+        self, conversation_id: UUID
+    ) -> InvestigationConversationModel | None:
+        """Fetch an investigation conversation by ID with turns loaded."""
+        stmt = (
+            select(InvestigationConversationModel)
+            .where(InvestigationConversationModel.id == conversation_id)
+            .options(selectinload(InvestigationConversationModel.turns))
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_active_conversation_for_transaction(
+        self, transaction_id: UUID
+    ) -> InvestigationConversationModel | None:
+        """Fetch the current active (or latest) conversation for a transaction."""
+        stmt = (
+            select(InvestigationConversationModel)
+            .where(
+                InvestigationConversationModel.transaction_id == transaction_id,
+                InvestigationConversationModel.status == "ACTIVE",
+            )
+            .order_by(InvestigationConversationModel.created_at.desc())
+            .options(selectinload(InvestigationConversationModel.turns))
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        conv = result.scalar_one_or_none()
+        if conv:
+            return conv
+
+        stmt_latest = (
+            select(InvestigationConversationModel)
+            .where(InvestigationConversationModel.transaction_id == transaction_id)
+            .order_by(InvestigationConversationModel.created_at.desc())
+            .options(selectinload(InvestigationConversationModel.turns))
+            .limit(1)
+        )
+        result_latest = await self.session.execute(stmt_latest)
+        return result_latest.scalar_one_or_none()
+
+    async def list_conversations_for_transaction(
+        self, transaction_id: UUID
+    ) -> list[InvestigationConversationModel]:
+        """Fetch all conversations for a transaction ordered by created_at desc."""
+        stmt = (
+            select(InvestigationConversationModel)
+            .where(InvestigationConversationModel.transaction_id == transaction_id)
+            .order_by(InvestigationConversationModel.created_at.desc())
+            .options(selectinload(InvestigationConversationModel.turns))
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def create_conversation_turn(
+        self, turn: InvestigationConversationTurnModel
+    ) -> InvestigationConversationTurnModel:
+        """Persist a new turn for an investigation conversation."""
+        self.session.add(turn)
+        await self.session.commit()
+        await self.session.refresh(turn)
+        return turn
+
+    async def update_conversation(
+        self,
+        conversation_id: UUID,
+        turn_count: int,
+        current_version: int,
+        status: str | None = None,
+    ) -> InvestigationConversationModel:
+        """Update conversation turn count, status, and version with optimistic locking."""
+        values: dict[str, Any] = {
+            "turn_count": turn_count,
+            "version": current_version + 1,
+            "updated_at": func.now(),
+        }
+        if status is not None:
+            values["status"] = status
+
+        stmt = (
+            update(InvestigationConversationModel)
+            .where(
+                InvestigationConversationModel.id == conversation_id,
+                InvestigationConversationModel.version == current_version,
+            )
+            .values(**values)
+        )
+        result = await self.session.execute(stmt)
+        if isinstance(result, CursorResult) and result.rowcount == 0:
+            raise ConcurrencyConflictError(
+                f"Conversation {conversation_id} was modified concurrently. Please reload."
+            )
+        await self.session.commit()
+        self.session.expire_all()
+        conv = await self.get_conversation_by_id(conversation_id)
+        assert conv is not None
+        return conv

@@ -131,6 +131,14 @@ class TransactionModel(Base):
         order_by="TransactionInvestigationModel.created_at.desc()",
     )
 
+    # Relationship to investigation conversations
+    conversations: Mapped[list["InvestigationConversationModel"]] = relationship(
+        "InvestigationConversationModel",
+        back_populates="transaction",
+        cascade="all, delete-orphan",
+        order_by="InvestigationConversationModel.created_at.desc()",
+    )
+
 
 class TransactionAuditModel(Base):
     """Append-only audit trail recording state transitions and lifecycle events."""
@@ -339,4 +347,155 @@ class TransactionInvestigationModel(Base):
     transaction: Mapped["TransactionModel"] = relationship(
         "TransactionModel",
         back_populates="investigations",
+    )
+
+
+class InvestigationConversationModel(Base):
+    """Investigation conversation session associated with a transaction."""
+
+    __tablename__ = "investigation_conversations"
+    __table_args__ = (
+        Index("ix_investigation_conversations_tx_created", "transaction_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="ACTIVE",
+    )
+    turn_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    # Relationships
+    transaction: Mapped["TransactionModel"] = relationship(
+        "TransactionModel",
+        back_populates="conversations",
+    )
+    turns: Mapped[list["InvestigationConversationTurnModel"]] = relationship(
+        "InvestigationConversationTurnModel",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="InvestigationConversationTurnModel.turn_index.asc()",
+    )
+
+
+class InvestigationConversationTurnModel(Base):
+    """Individual turn within an investigation conversation."""
+
+    __tablename__ = "investigation_conversation_turns"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            "turn_index",
+            name="uq_conversation_turn_index",
+        ),
+        Index("ix_conversation_turns_conv_turn", "conversation_id", "turn_index"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("investigation_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    turn_index: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    content: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    evidence_provenance: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    evidence_references: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    risk_sentiment: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    confidence: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+    )
+    confidence_score: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    missing_information: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    follow_up_questions: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    model_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+
+    # Relationship to conversation
+    conversation: Mapped["InvestigationConversationModel"] = relationship(
+        "InvestigationConversationModel",
+        back_populates="turns",
     )

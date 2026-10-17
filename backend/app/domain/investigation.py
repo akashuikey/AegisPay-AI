@@ -46,6 +46,7 @@ class EvidenceProvenance(StrEnum):
     RISK_ENGINE = "risk_engine"
     HISTORICAL_LEDGER = "historical_ledger"
     MODEL_INFERENCE = "model_inference"
+    AI_ASSISTANT = "ai_assistant"
 
 
 @dataclass(frozen=True)
@@ -87,3 +88,37 @@ class InvestigationResult:
     suggested_next_steps: list[str] = field(default_factory=list)
     model_metadata: InvestigationModelMetadata | None = None
     input_snapshot: dict[str, Any] = field(default_factory=dict)
+
+
+class ConversationRole(StrEnum):
+    """Participant role in an investigation conversation."""
+
+    OPERATOR = "operator"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
+class ConversationStatus(StrEnum):
+    """Lifecycle status of an investigation conversation."""
+
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    CLOSED = "CLOSED"
+
+
+@dataclass(frozen=True)
+class ConversationTurn:
+    """An individual turn in a multi-turn forensic investigation conversation."""
+
+    turn_index: int
+    role: ConversationRole
+    content: str
+    evidence_provenance: EvidenceProvenance | None = None
+    evidence_references: list[str] = field(default_factory=list)
+    findings: list[InvestigationFinding] = field(default_factory=list)
+    risk_sentiment: RiskSentiment | None = None
+    confidence: ConfidenceLevel | None = None
+    confidence_score: float | None = None
+    missing_information: list[str] = field(default_factory=list)
+    follow_up_questions: list[str] = field(default_factory=list)
+    model_metadata: dict[str, Any] = field(default_factory=dict)

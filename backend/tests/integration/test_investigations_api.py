@@ -416,3 +416,140 @@ async def test_investigation_evidence_integrity_end_to_end(client: AsyncClient) 
         assert any("doc_unsupplied_fbi" in msg for msg in data["missing_information"])
     finally:
         app.dependency_overrides[get_default_ai_client] = lambda: MockGeminiClient()
+
+
+# ---------------------------------------------------------------------------
+# Investigation Conversation End-to-End Integration Tests (P2-A2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_conversation_api_lifecycle(client: AsyncClient, db_session: AsyncSession) -> None:
+    """Verify multi-turn investigation session creation, turns, and non-mutation."""
+    # 1. Create transaction
+    tx_res = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_multi_turn_01",
+            "idempotency_key": f"idemp_{uuid.uuid4().hex[:12]}",
+            "amount": "450000.00",
+            "currency": "INR",
+            "payment_rail": "IMPS",
+            "recipient_name": "Cyber Police Reserve Account",
+            "recipient_identifier": "cyber.cbi@hdfc",
+            "purpose": "Digital arrest clearance bond",
+        },
+    )
+    assert tx_res.status_code == 201
+    tx_data = tx_res.json()
+    tx_id = tx_data["id"]
+    initial_version = tx_data["version"]
+    initial_state = tx_data["state"]
+
+    # 2. Start investigation conversation without initial message
+    conv_start_res = await client.post(
+        f"/api/v1/transactions/{tx_id}/conversations",
+        json={},
+    )
+    assert conv_start_res.status_code == 201
+    conv_data = conv_start_res.json()
+    conv_id = conv_data["id"]
+    assert conv_data["transaction_id"] == tx_id
+    assert conv_data["turn_count"] == 1
+    assert len(conv_data["turns"]) == 1
+    assert conv_data["turns"][0]["role"] == "assistant"
+    assert len(conv_data["turns"][0]["follow_up_questions"]) > 0
+
+    # 3. Submit operator turn with customer answer
+    turn_res = await client.post(
+        f"/api/v1/conversations/{conv_id}/turns",
+        json={
+            "content": (
+                "Customer states caller claimed to be CBI Officer Sharma. Customer was ordered "
+                "not to disconnect under threat of immediate non-bailable arrest."
+            ),
+            "evidence_provenance": "customer_statement",
+        },
+    )
+    assert turn_res.status_code == 201
+    updated_conv = turn_res.json()
+    assert updated_conv["turn_count"] == 3
+    turns = updated_conv["turns"]
+    assert turns[1]["role"] == "operator"
+    assert turns[2]["role"] == "assistant"
+    assert turns[2]["risk_sentiment"] == "COERCED"
+    assert any(f["id"] == "FINDING-COERCION" for f in turns[2]["findings"])
+
+    # 4. Fetch current conversation for transaction
+    current_res = await client.get(f"/api/v1/transactions/{tx_id}/conversations/current")
+    assert current_res.status_code == 200
+    assert current_res.json()["id"] == conv_id
+
+    # 5. List conversations for transaction
+    list_res = await client.get(f"/api/v1/transactions/{tx_id}/conversations")
+    assert list_res.status_code == 200
+    assert list_res.json()["total_entries"] == 1
+
+    # 6. Fetch conversation by primary ID
+    conv_by_id_res = await client.get(f"/api/v1/conversations/{conv_id}")
+    assert conv_by_id_res.status_code == 200
+    assert conv_by_id_res.json()["id"] == conv_id
+
+    # 7. Non-Mutation Invariant: Verify transaction state and version were NOT mutated
+    tx_check_res = await client.get(f"/api/v1/transactions/{tx_id}")
+    assert tx_check_res.status_code == 200
+    tx_after = tx_check_res.json()
+    assert tx_after["state"] == initial_state
+    assert tx_after["version"] == initial_version
+
+    # Verify no audit records were created by the conversation
+    audits_res = await client.get(f"/api/v1/transactions/{tx_id}/audit")
+    assert audits_res.status_code == 200
+    # Exactly 1 audit record from initial transaction creation
+    assert audits_res.json()["total_entries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_conversation_api_cross_transaction_isolation(client: AsyncClient) -> None:
+    """Verify cross-transaction scoping enforces 404 on mismatched transaction ID."""
+    # Create tx1 and start conversation
+    tx1_res = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_iso_1",
+            "idempotency_key": f"idemp_{uuid.uuid4().hex[:12]}",
+            "amount": "10000.00",
+            "currency": "INR",
+            "payment_rail": "UPI",
+            "recipient_name": "Merchant 1",
+            "recipient_identifier": "m1@upi",
+            "purpose": "Groceries",
+        },
+    )
+    tx1_id = tx1_res.json()["id"]
+    conv_res = await client.post(f"/api/v1/transactions/{tx1_id}/conversations", json={})
+    conv_id = conv_res.json()["id"]
+
+    # Create tx2
+    tx2_res = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_iso_2",
+            "idempotency_key": f"idemp_{uuid.uuid4().hex[:12]}",
+            "amount": "20000.00",
+            "currency": "INR",
+            "payment_rail": "UPI",
+            "recipient_name": "Merchant 2",
+            "recipient_identifier": "m2@upi",
+            "purpose": "Electronics",
+        },
+    )
+    tx2_id = tx2_res.json()["id"]
+
+    # Attempt to submit turn for conv1 through tx2 URL
+    mismatch_res = await client.post(
+        f"/api/v1/transactions/{tx2_id}/conversations/{conv_id}/turns",
+        json={"content": "Attempting cross-transaction conversation injection"},
+    )
+    assert mismatch_res.status_code == 404
+    assert "not found" in mismatch_res.json()["error"]["message"].lower()

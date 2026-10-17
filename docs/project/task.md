@@ -259,7 +259,67 @@
   - **Adversarial Non-Malice Invariant**: Untrusted customer statements attempting prompt injection (e.g. `SYSTEM OVERRIDE`) are flagged under `SOCIAL_ENGINEERING` but cannot classify the customer as `MALICIOUS`. Malicious classification is strictly reserved for confirmed mule/beneficiary fraud.
   - Zero Phase 2 Task P2-A2 code initiated. All verification criteria satisfied.
 
-#### Task P2-A2: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
+#### Task P2-A2: Bounded Multi-Turn Investigation Conversation
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer (Agent 1)
+- **Status**: `DONE`
+- **Objective**: Implement a bounded, multi-turn AI investigation conversation on top of the existing P2-A1 AI investigation capability. Enable operators to supply customer-provided messages, call transcripts, or notes, receive evidence-grounded forensic findings, answer targeted follow-up questions, and refine the investigation context iteratively without mutating transaction state or audit records.
+- **Deliverables**:
+  1. Configuration setting `INVESTIGATION_MAX_CONVERSATION_TURNS: int = 20` in `backend/app/core/config.py` and `.env.example`.
+  2. Domain models in `backend/app/domain/investigation.py`: `ConversationRole` (`operator`, `assistant`, `system`), `ConversationStatus` (`ACTIVE`, `COMPLETED`, `CLOSED`), `ConversationTurn`, and `EvidenceProvenance.AI_ASSISTANT`.
+  3. Prompt engineering in `backend/app/domain/investigation_prompts.py`: `CONVERSATION_INVESTIGATION_SYSTEM_INSTRUCTION` and `build_conversation_investigation_prompt` with chronological history collation, untrusted boundary fences, and grounding instructions.
+  4. Pydantic schemas in `backend/app/schemas/investigation.py`: `StartConversationRequest`, `AddConversationTurnRequest`, `ConversationTurnStructuredOutput`, `ConversationTurnResponse`, `InvestigationConversationResponse`, and `InvestigationConversationListResponse`.
+  5. Error definitions in `backend/app/core/errors.py`: `ConversationTurnLimitError` (HTTP 400, `CONVERSATION_TURN_LIMIT_EXCEEDED`) and `ConversationInactiveError` (HTTP 400, `CONVERSATION_INACTIVE`).
+  6. SQLAlchemy models in `backend/app/db/models.py`: `InvestigationConversationModel` and `InvestigationConversationTurnModel` with foreign keys, cascading turns, optimistic locking, and relationships.
+  7. Alembic migration `backend/app/db/migrations/versions/0005_create_investigation_conversations.py` applied cleanly to PostgreSQL.
+  8. Repository methods in `backend/app/repositories/transaction_repository.py`: `create_conversation`, `get_conversation_by_id`, `get_active_conversation_for_transaction`, `list_conversations_for_transaction`, `create_conversation_turn`, `update_conversation`, and eager-loaded relationship management.
+  9. AI client protocol extension in `backend/app/services/ai_client.py`: `generate_conversation_turn` implemented on `AIInvestigationClient`, `VertexGeminiClient`, and `MockGeminiClient` with non-repeating follow-up question synthesis and evidence reference extraction.
+  10. Application service in `backend/app/services/investigation_service.py`: `start_or_get_conversation`, `get_conversation`, `list_conversations_for_transaction`, `submit_conversation_turn`, and `_validate_and_sanitize_turn_integrity` with strict non-mutation of transaction records.
+  11. REST API endpoints in `backend/app/api/conversations.py` and `backend/app/api/transactions.py`:
+      - `POST /api/v1/transactions/{id}/conversations`: start or retrieve active conversation.
+      - `GET /api/v1/transactions/{id}/conversations/current`: fetch active conversation.
+      - `GET /api/v1/transactions/{id}/conversations`: list all conversations for transaction.
+      - `POST /api/v1/transactions/{id}/conversations/{conv_id}/turns`: submit operator turn (scoped to transaction).
+      - `GET /api/v1/conversations/{id}`: fetch conversation by ID.
+      - `POST /api/v1/conversations/{id}/turns`: submit turn by conversation ID.
+  12. Frontend API client in `frontend/src/api/investigationApi.ts`: `startInvestigationConversationApi`, `getCurrentConversationForTransactionApi`, and `submitConversationTurnApi` with typed interfaces.
+  13. Interactive React component `frontend/src/components/InvestigationConversationPanel.tsx` mounted inside `TransactionDrawer` in `frontend/src/App.tsx` under `'AI Investigation'` tab with turn counter, AI provider badge, risk sentiment, forensic findings, clickable follow-up inquiry chips, input composer, provenance selector, and non-mutation advisory notice.
+  14. Comprehensive test suites:
+      - Unit tests in `backend/tests/unit/test_investigation_service.py` (24 tests).
+      - Integration tests in `backend/tests/integration/test_investigations_api.py` (10 tests).
+      - Frontend unit and integration tests in `frontend/src/__tests__/InvestigationConversationPanel.test.tsx` (4 tests).
+- **Acceptance Criteria**:
+  - [x] Multi-turn conversation capability bounded to 20 turns (`INVESTIGATION_MAX_CONVERSATION_TURNS`).
+  - [x] State-machine invariant preserved: transaction state, version, and audit records remain 100% immutable throughout all conversation turns.
+  - [x] Strict cross-transaction isolation: verified that accessing or submitting turns across mismatched transactions fails with HTTP 404 (`RESOURCE_NOT_FOUND`).
+  - [x] Client-provided turn idempotency supported via `client_turn_id`.
+  - [x] Evidence integrity validated: findings grounded in conversation statements or prior turns.
+  - [x] Provider transparency: model metadata explicitly declares `"mock_gemini"` vs `"vertex_ai"`.
+  - [x] Follow-up questions generated contextually without repeating inquiries already answered in history.
+  - [x] Database migration applied cleanly (`0005_create_investigation_conversations`).
+  - [x] All 118 backend tests and 14 frontend tests pass (132 total tests, 100% green).
+  - [x] Backend and frontend linting, formatting, and type checks pass with zero warnings or errors.
+- **Verification Commands & Results**:
+  ```bash
+  # Full repository check
+  PATH=$HOME/.local/bin:$PATH make check-all
+  # Backend:
+  # - ruff check .: All checks passed!
+  # - ruff format --check .: 52 files already formatted
+  # - mypy app: Success: no issues found in 37 source files
+  # - pytest: 118 passed in 3.64s
+  # Frontend:
+  # - eslint .: 0 errors, 0 warnings
+  # - tsc --noEmit: 0 errors
+  # - vitest run: 14 passed in 3 test files
+  # - vite build: built in 558ms
+  ```
+- **Execution Log, Security & Blocker Notes**:
+  - **Primacy of Deterministic Policy**: Verified via `test_conversation_turns_do_not_mutate_transaction_state_or_audit` that initiating conversations and submitting multiple turns preserves transaction `state`, `version`, and audit count (1 from creation).
+  - **Authorization & Isolation**: Enforced strict relationship check `conversation.transaction_id == transaction_id` on all transaction-scoped routes. Documented the known architectural lack of JWT/session auth as an ongoing blocker for multi-user deployment.
+  - **SQLAlchemy Cache Synchronization**: Required `self.session.expire_all()` after creating conversation turns in repository to ensure eager `selectinload` queries refresh turn collections.
+  - Zero Phase 2 Task P2-A3 code initiated. All acceptance criteria satisfied.
+
+#### Task P2-A3: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
 
 ---
 

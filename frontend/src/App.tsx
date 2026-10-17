@@ -6,6 +6,7 @@ import {
   Smartphone, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { BackendHealthBadge } from './components/BackendHealthBadge';
+import { InvestigationConversationPanel } from './components/InvestigationConversationPanel';
 import {
   evaluateRiskApi,
   evaluateRiskLocally,
@@ -410,7 +411,12 @@ type SpeechWindow = Window & {
   webkitSpeechRecognition?: new () => SpeechRecognitionLike;
 };
 
-type DrawerTab = 'Live verification' | 'Risk assessment' | 'Evidence & checks' | 'Decision & history';
+type DrawerTab =
+  | 'Live verification'
+  | 'Risk assessment'
+  | 'Evidence & checks'
+  | 'AI Investigation'
+  | 'Decision & history';
 
 function App() {
   const [scenario, setScenario] = useState<Scenario>('digital_arrest');
@@ -2306,7 +2312,15 @@ function TransactionDrawer({
           </div>
         </div>
         <div className="tabrow">
-          {(['Live verification', 'Risk assessment', 'Evidence & checks', 'Decision & history'] as const).map((t) => (
+          {(
+            [
+              'Live verification',
+              'Risk assessment',
+              'Evidence & checks',
+              'AI Investigation',
+              'Decision & history',
+            ] as const
+          ).map((t) => (
             <button
               key={t}
               className={classes('tab', tab === t && 'active')}
@@ -2597,6 +2611,14 @@ function TransactionDrawer({
               </p>
             </section>
           </>
+        )}
+
+        {tab === 'AI Investigation' && (
+          <InvestigationConversationPanel
+            transactionId={tx.id}
+            transactionRecipient={tx.recipient}
+            transactionAmount={tx.amount}
+          />
         )}
 
         {tab === 'Decision & history' && (
