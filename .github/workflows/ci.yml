@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend Lint, Typecheck & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        working-directory: backend
+        run: uv sync --dev
+
+      - name: Run Ruff Lint Check
+        working-directory: backend
+        run: uv run ruff check .
+
+      - name: Run Ruff Format Check
+        working-directory: backend
+        run: uv run ruff format --check .
+
+      - name: Run mypy Static Type Analysis
+        working-directory: backend
+        run: uv run mypy app
+
+      - name: Run pytest Suite
+        working-directory: backend
+        run: uv run pytest
+
+  frontend:
+    name: Frontend Lint, Typecheck & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run TypeScript typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Run Tests
+        working-directory: frontend
+        run: npm run test
+
+      - name: Run Production Build
+        working-directory: frontend
+        run: npm run build

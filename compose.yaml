@@ -1,0 +1,26 @@
+name: aegispay-ai
+
+services:
+  db:
+    image: postgres:16.8-alpine
+    container_name: aegispay_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aegispay}
+      POSTGRES_USER: ${POSTGRES_USER:-aegispay_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegispay_dev_pw}
+    ports:
+      # Bind exclusively to localhost loopback to prevent external network exposure
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aegispay_user} -d ${POSTGRES_DB:-aegispay}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  postgres_data:
+    name: aegispay_postgres_data
