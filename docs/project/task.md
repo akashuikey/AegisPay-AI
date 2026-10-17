@@ -318,6 +318,33 @@
   - **Authorization & Isolation**: Enforced strict relationship check `conversation.transaction_id == transaction_id` on all transaction-scoped routes. Documented the known architectural lack of JWT/session auth as an ongoing blocker for multi-user deployment.
   - **SQLAlchemy Cache Synchronization**: Required `self.session.expire_all()` after creating conversation turns in repository to ensure eager `selectinload` queries refresh turn collections.
   - Zero Phase 2 Task P2-A3 code initiated. All acceptance criteria satisfied.
+- **Post-Implementation Verification Audit (2026-10-17)**: Focused audit of commit `ef3bd10`.
+  Two defects found and fixed (committed separately):
+  1. `client_turn_id` idempotency was documented/claimed but never enforced — retrying a turn
+     with the same token created duplicate operator+assistant turn pairs (reproduced: turn_count
+     3 -> 5). Fixed in `investigation_service.submit_conversation_turn` with an idempotent-replay
+     check; regression test `test_conversation_turn_client_turn_id_is_idempotent`.
+  2. Prompt history fidelity: the service built conversation-history dicts under keys
+     (`provenance`, no `turn_index`) that `build_conversation_investigation_prompt` did not read,
+     so every prior turn rendered as `index="0" provenance="none"`. Prior-turn **content** was
+     always passed correctly; only the index/provenance labels were wrong. Fixed the dict keys;
+     regression test `test_conversation_prompt_includes_prior_turns_with_distinct_indices`.
+  - Verified: transaction state/version/audit immutability across successful turns, provider
+    failures, and rejected requests (AI call precedes all persistence, so provider failure leaves
+    no partial writes); DB-level turn-ordering integrity via `uq_conversation_turn_index` (unique
+    on `conversation_id, turn_index`, confirmed present in Postgres), which also prevents the
+    20-turn bound from being exceeded by concurrent inserts; cross-transaction isolation on
+    transaction-scoped routes; untrusted-evidence fencing and prompt-injection non-malice
+    neutralization; mock/live provider attribution.
+  - **Unresolved security blocker (unchanged)**: endpoints still have NO authentication and NO
+    caller-level authorization. The `conversation.transaction_id == transaction_id` relationship
+    check is NOT authentication; the `GET/POST /api/v1/conversations/{id}` routes have no scoping
+    at all. Any client with a UUID can read or write any conversation. NOT safe for public or
+    multi-user deployment; acceptable only for a trusted single-operator private demo.
+  - Verification runs: backend `ruff check` clean, `ruff format --check` clean, `mypy app` clean,
+    `pytest` 120 passed (118 prior + 2 regression; `test_config::test_default_settings` passes
+    only without the local `POSTGRES_PORT=5433` override needed to reach the relocated DB in this
+    environment). Frontend: eslint clean, tsc clean, 14 vitest passed, vite build OK.
 
 #### Task P2-A3: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
 

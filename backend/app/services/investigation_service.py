@@ -471,8 +471,9 @@ class InvestigationService:
         assessment = await self.repository.get_latest_assessment(transaction_id)
         context = self._build_base_transaction_context(tx=tx, assessment=assessment)
         initial_system_turn = {
+            "turn_index": 0,
             "role": ConversationRole.SYSTEM.value,
-            "provenance": EvidenceProvenance.RISK_ENGINE.value,
+            "evidence_provenance": EvidenceProvenance.RISK_ENGINE.value,
             "content": (
                 "Case opened by operator. Analyze transaction context and deterministic "
                 "risk profile. Provide preliminary forensic observations and targeted questions."
@@ -560,6 +561,24 @@ class InvestigationService:
         # 1. Fetch conversation and enforce transaction isolation
         conv = await self.get_conversation(conversation_id, transaction_id=transaction_id)
 
+        # 1.5 Idempotent replay: if this client_turn_id was already recorded on an operator
+        # turn, return the current conversation state without creating duplicate turns. This
+        # honors the documented idempotency contract for retried/duplicate submissions.
+        if request.client_turn_id:
+            for existing_turn in conv.turns:
+                if (
+                    existing_turn.role == ConversationRole.OPERATOR.value
+                    and (existing_turn.model_metadata or {}).get("client_turn_id")
+                    == request.client_turn_id
+                ):
+                    logger.info(
+                        "Idempotent turn replay for conversation=%s client_turn_id=%s; "
+                        "returning existing state without creating duplicate turns.",
+                        conversation_id,
+                        request.client_turn_id,
+                    )
+                    return conv
+
         # 2. Check conversation active status
         if conv.status != ConversationStatus.ACTIVE.value:
             raise ConversationInactiveError(
@@ -581,16 +600,20 @@ class InvestigationService:
         # 5. Format history for prompt
         history_list = [
             {
+                "turn_index": t.turn_index,
                 "role": t.role,
-                "provenance": t.evidence_provenance or EvidenceProvenance.CUSTOMER_STATEMENT.value,
+                "evidence_provenance": (
+                    t.evidence_provenance or EvidenceProvenance.CUSTOMER_STATEMENT.value
+                ),
                 "content": t.content,
             }
             for t in sorted(conv.turns, key=lambda t: t.turn_index)
         ]
 
         operator_turn_dict = {
+            "turn_index": conv.turn_count,
             "role": ConversationRole.OPERATOR.value,
-            "provenance": request.evidence_provenance.value,
+            "evidence_provenance": request.evidence_provenance.value,
             "content": request.content,
         }
 

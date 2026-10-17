@@ -1066,3 +1066,133 @@ async def test_conversation_injection_neutralized_away_from_malicious() -> None:
     assert assistant_turn.risk_sentiment != "MALICIOUS"
     assert assistant_turn.risk_sentiment in ("SUSPICIOUS", "COERCED")
     assert any(f["id"] == "FINDING-ADVERSARIAL" for f in assistant_turn.findings)
+
+
+@pytest.mark.asyncio
+async def test_conversation_prompt_includes_prior_turns_with_distinct_indices() -> None:
+    """Regression: prior turns must be passed to the model with correct indices and provenance.
+
+    Guards against a key-mismatch where the service built history dicts under keys the prompt
+    builder did not read, causing every historical turn to render as index="0" provenance="none".
+    """
+    from app.db.models import InvestigationConversationModel, InvestigationConversationTurnModel
+    from app.domain.investigation import (
+        ConfidenceLevel,
+        ConversationStatus,
+        RiskSentiment,
+    )
+    from app.schemas.investigation import (
+        AddConversationTurnRequest,
+        ConversationTurnStructuredOutput,
+    )
+
+    tx_id = uuid4()
+    conv_id = uuid4()
+    mock_tx = TransactionModel(
+        id=tx_id,
+        customer_id="cust_1",
+        amount=Decimal("500000.00"),
+        currency="INR",
+        payment_rail="IMPS",
+        recipient_name="DCP Cyber Cell",
+        recipient_identifier="cbi.verify@axis",
+        purpose="Clearance fee",
+        state="FLAGGED_FOR_REVIEW",
+        version=1,
+    )
+
+    repo = AsyncMock()
+    tx_service = AsyncMock()
+    tx_service.get_transaction.return_value = mock_tx
+    repo.get_latest_assessment.return_value = None
+
+    existing_conv = InvestigationConversationModel(
+        id=conv_id,
+        transaction_id=tx_id,
+        status=ConversationStatus.ACTIVE.value,
+        turn_count=2,
+        version=2,
+        turns=[
+            InvestigationConversationTurnModel(
+                id=uuid4(),
+                conversation_id=conv_id,
+                turn_index=0,
+                role="assistant",
+                content="Preliminary case assessment turn zero.",
+                evidence_provenance="ai_assistant",
+                evidence_references=[],
+                findings=[],
+                missing_information=[],
+                follow_up_questions=[],
+            ),
+            InvestigationConversationTurnModel(
+                id=uuid4(),
+                conversation_id=conv_id,
+                turn_index=1,
+                role="operator",
+                content="Operator supplied customer statement turn one.",
+                evidence_provenance="customer_statement",
+                evidence_references=[],
+                findings=[],
+                missing_information=[],
+                follow_up_questions=[],
+            ),
+        ],
+    )
+    repo.get_conversation_by_id.return_value = existing_conv
+
+    async def fake_create_turn(turn: InvestigationConversationTurnModel):
+        existing_conv.turns.append(turn)
+        return turn
+
+    repo.create_conversation_turn.side_effect = fake_create_turn
+
+    async def fake_update_conv(conversation_id, turn_count, current_version, status=None):
+        existing_conv.turn_count = turn_count
+        existing_conv.version = current_version + 1
+        return existing_conv
+
+    repo.update_conversation.side_effect = fake_update_conv
+
+    captured: dict[str, str] = {}
+
+    class CapturingAIClient:
+        async def generate_conversation_turn(
+            self, prompt: str, system_instruction: str, correlation_id: str | None = None
+        ):
+            captured["prompt"] = prompt
+            output = ConversationTurnStructuredOutput(
+                reply="ack",
+                overall_risk_sentiment=RiskSentiment.UNKNOWN,
+                confidence=ConfidenceLevel.MEDIUM,
+                confidence_score=0.5,
+                findings=[],
+                missing_information=[],
+                follow_up_questions=[],
+                contradictory_or_mitigating_evidence=[],
+            )
+            return output, InvestigationModelMetadata(
+                provider="mock_gemini",
+                model_id="gemini-2.5-flash-mock",
+                latency_ms=1,
+                correlation_id=correlation_id,
+            )
+
+    service = InvestigationService(repo, tx_service, CapturingAIClient())
+
+    await service.submit_conversation_turn(
+        conversation_id=conv_id,
+        request=AddConversationTurnRequest(content="New operator question for turn two."),
+        transaction_id=tx_id,
+    )
+
+    prompt = captured["prompt"]
+    # Both prior turns appear with their real, distinct indices (not collapsed to index="0").
+    assert 'index="0" role="assistant"' in prompt
+    assert 'index="1" role="operator"' in prompt
+    # Provenance labels are carried through rather than defaulting to "none".
+    assert 'provenance="ai_assistant"' in prompt
+    assert 'provenance="customer_statement"' in prompt
+    # The prior turn contents are actually included in the model call.
+    assert "Preliminary case assessment turn zero." in prompt
+    assert "Operator supplied customer statement turn one." in prompt

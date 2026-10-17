@@ -12,7 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.investigations import get_default_ai_client
 from app.core.errors import AIProviderError
-from app.db.models import TransactionAuditModel, TransactionInvestigationModel
+from app.db.models import (
+    InvestigationConversationTurnModel,
+    TransactionAuditModel,
+    TransactionInvestigationModel,
+)
 from app.domain.investigation import (
     ConfidenceLevel,
     EvidenceProvenance,
@@ -553,3 +557,68 @@ async def test_conversation_api_cross_transaction_isolation(client: AsyncClient)
     )
     assert mismatch_res.status_code == 404
     assert "not found" in mismatch_res.json()["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_conversation_turn_client_turn_id_is_idempotent(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Verify a retried turn carrying the same client_turn_id does not create duplicate turns.
+
+    Regression: the client_turn_id field is documented as an idempotency token to prevent
+    accidental duplicate submission. Submitting the same token twice must be a no-op replay
+    returning the existing conversation state rather than appending a second operator/assistant
+    turn pair.
+    """
+    tx_res = await client.post(
+        "/api/v1/transactions",
+        json={
+            "customer_id": "cust_idem_turn_01",
+            "idempotency_key": f"idemp_{uuid.uuid4().hex[:12]}",
+            "amount": "50000.00",
+            "currency": "INR",
+            "payment_rail": "UPI",
+            "recipient_name": "Payee",
+            "recipient_identifier": "p@upi",
+            "purpose": "Test",
+        },
+    )
+    assert tx_res.status_code == 201
+    tx_id = tx_res.json()["id"]
+
+    conv_res = await client.post(f"/api/v1/transactions/{tx_id}/conversations", json={})
+    assert conv_res.status_code == 201
+    conv_id = conv_res.json()["id"]
+    assert conv_res.json()["turn_count"] == 1
+
+    token = "client-token-abc-123"
+    body = {
+        "content": "Customer states caller claimed to be CBI Officer Sharma.",
+        "client_turn_id": token,
+    }
+
+    first = await client.post(f"/api/v1/conversations/{conv_id}/turns", json=body)
+    assert first.status_code == 201
+    first_data = first.json()
+    assert first_data["turn_count"] == 3
+
+    # Retry the same logical submission (same client_turn_id) -> idempotent no-op replay
+    retry = await client.post(f"/api/v1/conversations/{conv_id}/turns", json=body)
+    assert retry.status_code == 201
+    retry_data = retry.json()
+    assert retry_data["turn_count"] == 3, "retry must not create duplicate turns"
+    assert len(retry_data["turns"]) == 3
+
+    # A genuinely new submission (no token / different token) still appends turns
+    new_body = {"content": "Follow-up: customer confirms active call ongoing."}
+    third = await client.post(f"/api/v1/conversations/{conv_id}/turns", json=new_body)
+    assert third.status_code == 201
+    assert third.json()["turn_count"] == 5
+
+    # Confirm persistence: only one operator turn carries the idempotency token
+    turn_stmt = select(InvestigationConversationTurnModel).where(
+        InvestigationConversationTurnModel.conversation_id == uuid.UUID(conv_id)
+    )
+    turns = (await db_session.execute(turn_stmt)).scalars().all()
+    tokened = [t for t in turns if (t.model_metadata or {}).get("client_turn_id") == token]
+    assert len(tokened) == 1
