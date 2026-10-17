@@ -90,7 +90,10 @@ async def clean_database_after_test() -> AsyncGenerator[None, None]:
     async with session_factory() as session:
         try:
             await session.execute(
-                text("TRUNCATE TABLE transaction_audits, transactions RESTART IDENTITY CASCADE;")
+                text(
+                    "TRUNCATE TABLE transaction_assessments, transaction_audits, "
+                    "transactions RESTART IDENTITY CASCADE;"
+                )
             )
             await session.commit()
         except Exception:

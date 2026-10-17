@@ -3,8 +3,10 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -112,6 +114,14 @@ class TransactionModel(Base):
         order_by="TransactionAuditModel.created_at.asc()",
     )
 
+    # Relationship to deterministic risk assessment records
+    assessments: Mapped[list["TransactionAssessmentModel"]] = relationship(
+        "TransactionAssessmentModel",
+        back_populates="transaction",
+        cascade="all, delete-orphan",
+        order_by="TransactionAssessmentModel.created_at.desc()",
+    )
+
 
 class TransactionAuditModel(Base):
     """Append-only audit trail recording state transitions and lifecycle events."""
@@ -161,4 +171,73 @@ class TransactionAuditModel(Base):
     transaction: Mapped["TransactionModel"] = relationship(
         "TransactionModel",
         back_populates="audits",
+    )
+
+
+class TransactionAssessmentModel(Base):
+    """Persistent representation of an explainable deterministic risk evaluation."""
+
+    __tablename__ = "transaction_assessments"
+    __table_args__ = (
+        Index("ix_transaction_assessments_tx_created", "transaction_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    risk_score: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    risk_level: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    recommended_action: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    explanation: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    triggered_rules: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    supporting_evidence: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    missing_evidence: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    input_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+
+    # Relationship to parent transaction
+    transaction: Mapped["TransactionModel"] = relationship(
+        "TransactionModel",
+        back_populates="assessments",
     )

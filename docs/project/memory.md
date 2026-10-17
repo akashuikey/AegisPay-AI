@@ -40,27 +40,36 @@
 
 ## 3. Current Milestone & Status
 
-- **Current Milestone**: Phase 1 — Repository Foundation & Transaction Domain Core (`DONE`).
+- **Current Milestone**: Phase 1 — Core Banking Simulator & Deterministic Risk Engine (`DONE`).
+- **Active Task**: All Phase 1 tasks complete (`P1-A1`, `P1-A2`, `P1-A3`). Ready for Phase 2 kickoff.
 - **Completed Tasks**:
   - **P1-A1**: Repository foundation, FastAPI backend, Aster Bank frontend prototype preservation, PostgreSQL Docker Compose, Alembic baseline, and health probes.
   - **P1-A2**: 10-state transaction workflow state machine (`INITIATED`, `ASSESSING`, `RISK_ASSESSED`, `DECISION_READY`, `VERIFICATION_REQUIRED`, `HELD_FOR_VERIFICATION`, `INVESTIGATING`, `HUMAN_REVIEW`, `SETTLED_SIMULATED`, `CANCELLED_SIMULATED`), SQLAlchemy models (`TransactionModel`, `TransactionAuditModel`), Alembic migration `0002_create_transactions_and_audits`, transaction repository with optimistic concurrency locking and customer-scoped idempotency, transaction service, Pydantic v2 schemas, REST endpoints (`/api/v1/transactions`), 63 pytest unit/integration tests, and full test isolation on `test_aegispay`.
-- **Next Milestone**: Phase 2 — Simulation Ingestion & Deterministic Risk Engine.
-  - Next task: **P2-A1**: Simulated Payment Ingestion API & Recipient Intelligence Registry.
+  - **P1-A3**: Deterministic Risk Engine & Scenario-Driven Assessment. Pure domain evaluation with 11 explainable rules; mandatory guardrails (coercion overrides trusted beneficiary, voice stress is advisory only, missing evidence explicitly tagged as unknown); benchmark scenario fixtures for all 6 demo fraud scenarios; `transaction_assessments` database table with Alembic migration `0003_create_transaction_assessments`; `RiskService` with atomic lifecycle transitions (`INITIATED` -> `ASSESSING` -> `RISK_ASSESSED` -> `DECISION_READY`) and audit trail; REST endpoints `POST /api/v1/risk/evaluate`, `GET /api/v1/risk/scenarios`, `POST /api/v1/transactions/{id}/assess`, and `GET /api/v1/transactions/{id}/assessment`; frontend Aster Bank integration with risk score column, scenario switcher, and dedicated Risk Assessment drawer tab; 100% green test suite (78 backend tests, 9 Vitest frontend tests).
 
 ---
 
 ## 4. Confirmed Decisions & Architectural Patterns
 
-- **State Machine Architecture**: Authoritative 10-state workflow lifecycle implemented in `app.domain.state_machine`. Pure domain logic with `validate_transition`, `can_transition`, and `is_terminal`. Raises `InvalidStateTransitionError` (HTTP 400).
-- **Idempotency Strategy**: Scoped per `(customer_id, idempotency_key)` backed by PostgreSQL unique constraint. Canonical SHA-256 payload hash is recorded. Re-execution with exact payload returns HTTP 200 OK; re-execution with conflicting payload returns HTTP 409 Conflict (`IdempotencyConflictError`).
-- **Concurrency Control**: Optimistic version locking via integer `version` incremented on each state change. Raises `ConcurrencyConflictError` (HTTP 409) if version is stale.
-- **Audit Integrity**: Append-only `transaction_audits` recorded atomically in the same database transaction as transaction creation and updates.
-- **Testing Strategy**: Isolated test database `test_aegispay` on PostgreSQL container with automatic table teardown and truncation per test run.
+- **Task-Tracker Realignment**: In accordance with user requirements, the Deterministic Risk Engine belongs to Phase 1, and the AI Investigation Agent belongs to Phase 2.
+- **State Machine Architecture**: Authoritative 10-state workflow lifecycle implemented in `app.domain.state_machine`. Pure domain logic with `validate_transition`, `can_transition`, and `is_terminal`.
+- **Deterministic Risk Engine Principles**:
+  - Feature evaluation from concrete transaction and evidence inputs only (zero ML / LLM in Phase 1).
+  - No scenario IDs, scenario names, or keyword shortcuts in scoring logic.
+  - Missing evidence is explicitly captured as unknown, never silently assumed safe or dangerous.
+  - Relative risk score (0–100), risk levels (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), and policy recommendations (`ALLOW`, `WARN_CUSTOMER`, `REQUIRE_VERIFICATION`, `HOLD_FOR_INVESTIGATION`, `BLOCK_SIMULATED`).
+  - Core guardrail: Trusted recipient status CANNOT override strong coercion indicators. Voice stress alone is NOT proof of fraud.
+- **Idempotency Strategy**: Scoped per `(customer_id, idempotency_key)` backed by PostgreSQL unique constraint and canonical SHA-256 payload hash.
+- **Concurrency Control**: Optimistic version locking via integer `version` incremented on each state change.
+- **Audit Integrity**: Append-only `transaction_audits` recorded atomically in the same database transaction.
+- **Risk Assessment History**: Persisted in `transaction_assessments` table, retaining complete input snapshot, triggered rules, supporting evidence, and missing evidence.
 
 ---
 
-## 5. Next Immediate Actions (Phase 2 Initiation)
+## 5. Next Phase / Tasks (Awaiting User Directive)
 
-1. Review requirements for Task P2-A1 (Simulated Payment Ingestion API & Recipient Intelligence Registry).
-2. Design recipient intelligence models (reputation, account age, scam report count, risk flags).
-3. Implement ingestion schemas and recipient validation pipelines.
+- **Phase 2 Kickoff**: Multi-Modal AI Investigation Agent & Coercion Voice Analysis.
+  - P2-A1: Gemini-powered investigation agent & evidence synthesis.
+  - P2-A2: Real-time coercion detection & voice interview pipeline.
+  - P2-A3: Operator console AI investigation panel & simulation controls.
+

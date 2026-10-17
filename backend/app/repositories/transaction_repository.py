@@ -8,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConcurrencyConflictError
 from app.core.logging import get_logger
-from app.db.models import TransactionAuditModel, TransactionModel
+from app.db.models import (
+    TransactionAssessmentModel,
+    TransactionAuditModel,
+    TransactionModel,
+)
 
 logger = get_logger(__name__)
 
@@ -137,3 +141,25 @@ class TransactionRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def create_assessment(
+        self, assessment: TransactionAssessmentModel
+    ) -> TransactionAssessmentModel:
+        """Persist a deterministic risk assessment record."""
+        self.session.add(assessment)
+        await self.session.commit()
+        await self.session.refresh(assessment)
+        return assessment
+
+    async def get_latest_assessment(
+        self, transaction_id: UUID
+    ) -> TransactionAssessmentModel | None:
+        """Retrieve the most recent risk assessment for a transaction."""
+        stmt = (
+            select(TransactionAssessmentModel)
+            .where(TransactionAssessmentModel.transaction_id == transaction_id)
+            .order_by(TransactionAssessmentModel.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()

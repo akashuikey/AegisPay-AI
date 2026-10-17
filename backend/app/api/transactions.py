@@ -7,7 +7,13 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db_session
+from app.domain.risk_engine import RecommendedAction, RiskLevel
 from app.repositories.transaction_repository import TransactionRepository
+from app.schemas.risk import (
+    AssessTransactionRequest,
+    RiskAssessmentResponse,
+    TriggeredRuleResponse,
+)
 from app.schemas.transaction import (
     AuditHistoryResponse,
     CreateTransactionRequest,
@@ -16,6 +22,7 @@ from app.schemas.transaction import (
     TransactionResponse,
     TransitionTransactionRequest,
 )
+from app.services.risk_service import RiskService
 from app.services.transaction_service import TransactionService
 
 router = APIRouter(prefix="/transactions", tags=["Transactions"])
@@ -27,6 +34,15 @@ def get_transaction_service(
     """Dependency provider for TransactionService with request-scoped DB session."""
     repository = TransactionRepository(session)
     return TransactionService(repository)
+
+
+def get_risk_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> RiskService:
+    """Dependency provider for RiskService with request-scoped DB session."""
+    repository = TransactionRepository(session)
+    transaction_service = TransactionService(repository)
+    return RiskService(repository, transaction_service)
 
 
 @router.post(
@@ -129,4 +145,87 @@ async def get_transaction_audit(
         transaction_id=transaction_id,
         total_entries=len(audits),
         items=[TransactionAuditResponse.model_validate(audit) for audit in audits],
+    )
+
+
+@router.post(
+    "/{transaction_id}/assess",
+    response_model=RiskAssessmentResponse,
+    summary="Assess transaction risk",
+    description=(
+        "Deterministically evaluates transaction risk, advancing state through "
+        "ASSESSING -> RISK_ASSESSED -> DECISION_READY."
+    ),
+)
+async def assess_transaction(
+    transaction_id: UUID,
+    request: AssessTransactionRequest,
+    service: Annotated[RiskService, Depends(get_risk_service)],
+) -> RiskAssessmentResponse:
+    """Evaluate deterministic risk rules and advance transaction lifecycle states."""
+    domain_evidence = request.evidence.to_domain() if request.evidence else None
+    _, assessment = await service.assess_transaction(
+        transaction_id=transaction_id,
+        evidence=domain_evidence,
+        actor_type=request.actor_type,
+        reason=request.reason,
+        correlation_id=request.correlation_id,
+    )
+    return RiskAssessmentResponse(
+        id=assessment.id,
+        transaction_id=assessment.transaction_id,
+        risk_score=assessment.risk_score,
+        risk_level=RiskLevel(assessment.risk_level),
+        recommended_action=RecommendedAction(assessment.recommended_action),
+        explanation=assessment.explanation,
+        triggered_rules=[
+            TriggeredRuleResponse(
+                rule_id=r["rule_id"],
+                rule_name=r["rule_name"],
+                description=r["description"],
+                weight=r["weight"],
+                severity=RiskLevel(r["severity"]),
+                evidence=r["evidence"],
+            )
+            for r in assessment.triggered_rules
+        ],
+        supporting_evidence=assessment.supporting_evidence,
+        missing_evidence=assessment.missing_evidence,
+        created_at=assessment.created_at,
+    )
+
+
+@router.get(
+    "/{transaction_id}/assessment",
+    response_model=RiskAssessmentResponse,
+    summary="Get latest transaction assessment",
+    description="Retrieve the most recent risk assessment result for a transaction.",
+)
+async def get_latest_transaction_assessment(
+    transaction_id: UUID,
+    service: Annotated[RiskService, Depends(get_risk_service)],
+) -> RiskAssessmentResponse:
+    """Retrieve the most recent risk assessment result."""
+    assessment = await service.get_latest_assessment(transaction_id)
+    return RiskAssessmentResponse(
+        id=assessment.id,
+        transaction_id=assessment.transaction_id,
+        risk_score=assessment.risk_score,
+        risk_level=RiskLevel(assessment.risk_level),
+        recommended_action=RecommendedAction(assessment.recommended_action),
+        explanation=assessment.explanation,
+        triggered_rules=[
+            TriggeredRuleResponse(
+                rule_id=r["rule_id"],
+                rule_name=r["rule_name"],
+                description=r["description"],
+                weight=r["weight"],
+                severity=RiskLevel(r["severity"]),
+                evidence=r["evidence"],
+            )
+            for r in assessment.triggered_rules
+        ],
+        supporting_evidence=assessment.supporting_evidence,
+        missing_evidence=assessment.missing_evidence,
+        created_at=assessment.created_at,
     )

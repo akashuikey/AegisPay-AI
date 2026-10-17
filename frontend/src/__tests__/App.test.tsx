@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import App from "../App";
 
 describe("AegisPay AI / Aster Bank Console & Phone Simulator", () => {
@@ -22,7 +22,7 @@ describe("AegisPay AI / Aster Bank Console & Phone Simulator", () => {
     expect(screen.getByText(/DEMO \/ SIMULATED/i)).toBeInTheDocument();
   });
 
-  it("renders the 6-metric summary cards and payment activity table", () => {
+  it("renders the 6-metric summary cards and payment activity table with risk scores", () => {
     globalThis.fetch = vi.fn().mockImplementation(() => new Promise(() => {}));
     render(<App />);
 
@@ -35,6 +35,9 @@ describe("AegisPay AI / Aster Bank Console & Phone Simulator", () => {
     expect(screen.getByText(/Meera Iyer/i)).toBeInTheDocument();
     expect(screen.getByText(/Kabir Shah/i)).toBeInTheDocument();
     expect(screen.getByText(/Sana Kapoor/i)).toBeInTheDocument();
+
+    // Risk score column
+    expect(screen.getByRole("columnheader", { name: /Risk score/i })).toBeInTheDocument();
   });
 
   it("renders the customer mobile phone simulator", () => {
@@ -64,5 +67,44 @@ describe("AegisPay AI / Aster Bank Console & Phone Simulator", () => {
       expect(screen.getByText(/API Online/i)).toBeInTheDocument();
     });
   });
-});
 
+  it("provides all 6 benchmark demo scenarios in presenter controls", () => {
+    globalThis.fetch = vi.fn().mockImplementation(() => new Promise(() => {}));
+    render(<App />);
+
+    const select = screen.getByTestId("select-scenario") as HTMLSelectElement;
+    expect(select).toBeInTheDocument();
+
+    const optionValues = Array.from(select.options).map((o) => o.value);
+    expect(optionValues).toContain("digital_arrest");
+    expect(optionValues).toContain("investment_scam");
+    expect(optionValues).toContain("fake_invoice");
+    expect(optionValues).toContain("mule_network");
+    expect(optionValues).toContain("legitimate_high_value");
+    expect(optionValues).toContain("ambiguous_payment");
+  });
+
+  it("renders deterministic risk assessment tab and details in the transaction drawer", async () => {
+    globalThis.fetch = vi.fn().mockImplementation(() => new Promise(() => {}));
+    render(<App />);
+
+    // Click on Leela Menon's row (which has a HIGH risk assessment from coercion/call)
+    const row = screen.getByTestId("row-transaction-AST-240618-0824");
+    fireEvent.click(row);
+
+    // Verify transaction drawer is open
+    expect(screen.getByTestId("transaction-drawer")).toBeInTheDocument();
+    expect(screen.getByTestId("drawer-risk-level")).toBeInTheDocument();
+
+    // Switch to Risk assessment tab
+    const riskTab = screen.getByTestId("drawer-tab-risk-assessment");
+    fireEvent.click(riskTab);
+
+    // Verify Risk section rendered
+    expect(screen.getByTestId("drawer-risk-section")).toBeInTheDocument();
+    expect(screen.getByTestId("drawer-risk-tier")).toHaveTextContent("HIGH");
+    expect(screen.getByTestId("drawer-recommended-action")).toHaveTextContent("HOLD_FOR_INVESTIGATION");
+    expect(screen.getByTestId("triggered-rules-list")).toBeInTheDocument();
+    expect(screen.getByTestId("missing-evidence-list")).toBeInTheDocument();
+  });
+});
