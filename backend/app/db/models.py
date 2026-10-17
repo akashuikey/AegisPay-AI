@@ -967,3 +967,54 @@ class TransactionNotificationModel(Base):
     transaction: Mapped["TransactionModel"] = relationship(
         "TransactionModel",
     )
+
+
+class ScenarioRunModel(Base):
+    """End-to-end simulation scenario run and its explainability timeline (P2-A8).
+
+    One row per scenario execution. The per-stage history is stored as an ordered
+    JSON array (``stages``) built from REAL persisted artifacts; it references the
+    authoritative records (transaction, assessment, decision, response, ...) rather
+    than duplicating their content. ``status`` reports workflow execution progress
+    and is deliberately distinct from whether the fraud decision was "correct".
+    """
+
+    __tablename__ = "scenario_runs"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_scenario_runs_idempotency_key"),
+        Index("ix_scenario_runs_scenario_created", "scenario_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    scenario_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    scenario_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    catalog_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    execution_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
+    ai_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    stages: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    error_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )

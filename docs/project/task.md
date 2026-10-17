@@ -749,6 +749,48 @@
 
 ---
 
+#### Task P2-A8: End-to-End Fraud Simulation & Explainability Dashboard
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer
+- **Status**: `DONE`
+- **Objective**: Let an operator select a predefined fraud scenario, run it through the existing application workflow, inspect the evidence-to-decision-to-intervention timeline, and compare the observed result with the scenario's expected outcome. Simulation/explainability milestone only — no new fraud engine; all payment outcomes remain simulated. See [ADR-007](../decisions/ADR-007-end-to-end-scenario-simulation.md).
+- **Deliverables**:
+  1. `backend/app/domain/scenario_catalog.py`: versioned (`CATALOG_VERSION=p2a8.v1`) pure-data catalogue of 8 scenarios (digital arrest, investment scam, fake invoice, mule network, legitimate high-value, ambiguous/insufficient-evidence, ordinary stressed customer, strong coercion + successful verification). Each declares simulated inputs, risk/investigation/coercion/voice evidence, verification behaviour, and a separate `ScenarioExpectation` (expected action, final state, response type, customer intervention, verification outcome, limitations). Expectations never feed the pipeline.
+  2. `backend/app/domain/scenario_evaluation.py`: pure expected-vs-actual comparison → `MATCH`/`MISMATCH`/`INCOMPLETE` per dimension; preserves the observed outcome; carries an explicit "not real-world accuracy" disclaimer.
+  3. `backend/app/services/scenario_orchestration_service.py`: orchestrates the existing `TransactionService`, `RiskService`, `InvestigationService`, `CoercionService`, `DecisionWorkflowService`, `VerificationService`, and `ResponseOrchestrationService`. Deterministic (mock) vs explicit live-provider mode; stage timeline derived from real persisted artifacts; idempotent start + safe retry.
+  4. `backend/app/db/models.py` + Alembic migration `0012_create_scenario_runs.py`: `scenario_runs` table (run metadata + ordered JSON `stages` timeline + `transaction_id` FK). Upgrade/downgrade/re-upgrade verified against the dev DB.
+  5. `backend/app/repositories/transaction_repository.py`: scenario-run persistence/query methods (create/get/by-idempotency-key/list/update).
+  6. `backend/app/schemas/scenario.py`: request/response schemas incl. `ScenarioExecutionMode`.
+  7. REST API `backend/app/api/scenarios.py` (operator-authenticated, registered in `router.py`): `GET /scenarios`, `POST /scenarios/{id}/runs`, `GET /scenarios/runs`, `GET /scenarios/runs/{run_id}`, `GET /scenarios/runs/{run_id}/evaluation`, `POST /scenarios/runs/{run_id}/retry`.
+  8. Frontend `frontend/src/api/scenarioApi.ts` + `frontend/src/components/ScenarioSimulationPanel.tsx`, mounted as a new `Scenario Lab` surface in `App.tsx` (catalogue, mode toggle, run, timeline with stage states/evidence refs, expected-vs-actual, workflow-success vs decision-correctness distinction, retry, sandbox disclaimer).
+  9. Tests: `tests/unit/test_scenario_catalog.py`, `tests/unit/test_scenario_evaluation.py`, `tests/integration/test_scenarios_api.py` (20 tests), and `frontend/src/__tests__/ScenarioSimulationPanel.test.tsx` (3 tests).
+- **Acceptance Criteria**:
+  - [x] Catalogue has stable ids and versions; 8 required scenarios present.
+  - [x] Each scenario executes end-to-end in deterministic mode and its evaluation is `MATCH`.
+  - [x] Digital-arrest → `HOLD_FOR_INVESTIGATION` / `HELD_FOR_VERIFICATION`; legitimate high-value → `ALLOW` / `SETTLED_SIMULATED`; ordinary voice stress alone never holds or blocks; successful verification with persistent strong coercion stays held.
+  - [x] AI/provider unavailable degrades gracefully (investigation/coercion `UNAVAILABLE`) and the workflow still completes.
+  - [x] Expectation never overrides the authoritative observed outcome; evaluation reports `MATCH`/`MISMATCH`/`INCOMPLETE`.
+  - [x] No fabricated stage results/timestamps; skipped/unavailable stages explicit.
+  - [x] Idempotent runs; concurrent same-key requests create exactly one run; retry reuses the transaction/decision/response without duplicates.
+  - [x] Operator authentication enforced on all scenario routes.
+  - [x] Migration upgrade/downgrade/re-upgrade verified.
+  - [x] All quality gates pass: 276 backend tests, 51 frontend tests, ruff/mypy/eslint/tsc/vite build.
+- **Verification Commands & Results**:
+  ```bash
+  # Backend (POSTGRES_PORT=5433 via .env):
+  uv run ruff check .            # All checks passed!
+  uv run ruff format --check .   # 97 files already formatted
+  uv run mypy app                # Success: no issues found in 70 source files
+  uv run pytest                  # 276 passed
+  uv run alembic upgrade head && uv run alembic downgrade -1 && uv run alembic upgrade head  # OK
+  # Frontend:
+  npm run lint                   # 0 problems
+  npm run typecheck              # 0 errors
+  npm run test                   # 51 passed (9 files)
+  npm run build                  # built successfully
+  ```
+
+---
+
 ### Phase 3: Customer Portal & Dynamic Intervention UI
 - **Task P3-A1**: Simulated Banking Customer Payment Flow & Dynamic Intervention UI (`NOT_STARTED`)
 

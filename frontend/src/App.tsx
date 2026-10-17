@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, ArrowDownLeft, BookOpen, Check,
-  FileSearch, Headphones, Landmark, LockKeyhole, MessageSquareText,
+  FileSearch, FlaskConical, Headphones, Landmark, LockKeyhole, MessageSquareText,
   Mic, MicOff, Phone as PhoneIcon, PhoneCall, PhoneOff, RotateCcw, Search, ShieldAlert, ShieldCheck,
   Smartphone, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { BackendHealthBadge } from './components/BackendHealthBadge';
+import ScenarioSimulationPanel from './components/ScenarioSimulationPanel';
 import { InvestigationConversationPanel } from './components/InvestigationConversationPanel';
 import { InvestigationReviewPanel } from './components/InvestigationReviewPanel';
 import { VerificationPanel } from './components/VerificationPanel';
@@ -32,7 +33,12 @@ type Scenario =
   | 'unavailable'
   | 'agent';
 
-type Surface = 'Live Payments' | 'Verification Sources' | 'Settings' | 'Agent Payments';
+type Surface =
+  | 'Live Payments'
+  | 'Verification Sources'
+  | 'Scenario Lab'
+  | 'Settings'
+  | 'Agent Payments';
 type PayState =
   | 'Awaiting verification'
   | 'Awaiting customer decision'
@@ -1188,6 +1194,7 @@ function App() {
   const nav: { name: Surface; icon: typeof Activity }[] = [
     { name: 'Live Payments', icon: Activity },
     { name: 'Verification Sources', icon: FileSearch },
+    { name: 'Scenario Lab', icon: FlaskConical },
   ];
 
   const summaryCards = [
@@ -1677,6 +1684,8 @@ function App() {
             <Policies policyLimit={policyLimit} />
           ) : surface === 'Verification Sources' ? (
             <Sources records={records} />
+          ) : surface === 'Scenario Lab' ? (
+            <ScenarioSimulationPanel />
           ) : surface === 'Agent Payments' ? (
             <AgentSurface
               agentResult={agentResult}

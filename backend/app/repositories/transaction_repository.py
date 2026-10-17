@@ -13,6 +13,7 @@ from app.core.logging import get_logger
 from app.db.models import (
     InvestigationConversationModel,
     InvestigationConversationTurnModel,
+    ScenarioRunModel,
     TransactionAssessmentModel,
     TransactionAuditModel,
     TransactionCoercionAnalysisModel,
@@ -564,3 +565,75 @@ class TransactionRepository:
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    # --- P2-A8: End-to-End Scenario Simulation Run Persistence ---
+
+    async def create_scenario_run(self, run: ScenarioRunModel) -> ScenarioRunModel:
+        """Persist a new scenario run. Rolls back on IntegrityError (duplicate key)."""
+        self.session.add(run)
+        try:
+            await self.session.commit()
+            await self.session.refresh(run)
+            return run
+        except IntegrityError:
+            await self.session.rollback()
+            raise
+
+    async def get_scenario_run_by_id(self, run_id: UUID) -> ScenarioRunModel | None:
+        """Fetch a scenario run by primary key."""
+        stmt = select(ScenarioRunModel).where(ScenarioRunModel.id == run_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_scenario_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> ScenarioRunModel | None:
+        """Fetch a scenario run by its idempotency key."""
+        stmt = select(ScenarioRunModel).where(ScenarioRunModel.idempotency_key == idempotency_key)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_scenario_runs(
+        self, limit: int = 50, offset: int = 0, scenario_id: str | None = None
+    ) -> tuple[list[ScenarioRunModel], int]:
+        """List scenario runs (most recent first) with a total count."""
+        count_stmt = select(func.count(ScenarioRunModel.id))
+        query_stmt = select(ScenarioRunModel).order_by(ScenarioRunModel.created_at.desc())
+        if scenario_id is not None:
+            count_stmt = count_stmt.where(ScenarioRunModel.scenario_id == scenario_id)
+            query_stmt = query_stmt.where(ScenarioRunModel.scenario_id == scenario_id)
+        total = (await self.session.execute(count_stmt)).scalar_one() or 0
+        query_stmt = query_stmt.limit(limit).offset(offset)
+        result = await self.session.execute(query_stmt)
+        return list(result.scalars().all()), int(total)
+
+    async def update_scenario_run(
+        self,
+        run_id: UUID,
+        *,
+        status: str,
+        stages: list[dict[str, Any]],
+        transaction_id: UUID | None = None,
+        ai_provider: str | None = None,
+        error_category: str | None = None,
+        detail: str | None = None,
+    ) -> ScenarioRunModel:
+        """Persist the run's status, stage timeline, and references."""
+        values: dict[str, Any] = {
+            "status": status,
+            "stages": stages,
+            "updated_at": func.now(),
+        }
+        if transaction_id is not None:
+            values["transaction_id"] = transaction_id
+        values["ai_provider"] = ai_provider
+        values["error_category"] = error_category
+        values["detail"] = detail
+
+        stmt = update(ScenarioRunModel).where(ScenarioRunModel.id == run_id).values(**values)
+        await self.session.execute(stmt)
+        await self.session.commit()
+        refreshed = await self.get_scenario_run_by_id(run_id)
+        if refreshed is None:
+            raise ConcurrencyConflictError(f"Scenario run {run_id} no longer exists")
+        return refreshed

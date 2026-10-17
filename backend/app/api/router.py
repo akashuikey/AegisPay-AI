@@ -12,6 +12,7 @@ from app.api import (
     fraud_responses,
     investigations,
     risk,
+    scenarios,
     transactions,
     verification,
 )
@@ -39,6 +40,7 @@ router.include_router(risk.router, dependencies=_operator_only)
 router.include_router(investigations.router, dependencies=_operator_only)
 router.include_router(conversations.router, dependencies=_operator_only)
 router.include_router(coercion.router, dependencies=_operator_only)
+router.include_router(scenarios.router, dependencies=_operator_only)
 
 
 class ApiInfoResponse(BaseModel):
