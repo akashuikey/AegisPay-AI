@@ -9,6 +9,7 @@ from sqlalchemy import (
     JSON,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -120,6 +121,14 @@ class TransactionModel(Base):
         back_populates="transaction",
         cascade="all, delete-orphan",
         order_by="TransactionAssessmentModel.created_at.desc()",
+    )
+
+    # Relationship to AI investigation records
+    investigations: Mapped[list["TransactionInvestigationModel"]] = relationship(
+        "TransactionInvestigationModel",
+        back_populates="transaction",
+        cascade="all, delete-orphan",
+        order_by="TransactionInvestigationModel.created_at.desc()",
     )
 
 
@@ -240,4 +249,94 @@ class TransactionAssessmentModel(Base):
     transaction: Mapped["TransactionModel"] = relationship(
         "TransactionModel",
         back_populates="assessments",
+    )
+
+
+class TransactionInvestigationModel(Base):
+    """Forensic AI-generated investigation records analyzing contextual evidence."""
+
+    __tablename__ = "transaction_investigations"
+    __table_args__ = (
+        Index("ix_transaction_investigations_tx_created", "transaction_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transaction_assessments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    summary: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    overall_risk_sentiment: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    confidence: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+    )
+    confidence_score: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+    )
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    contradictory_evidence: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    missing_information: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    unresolved_questions: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    suggested_next_steps: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+    )
+    model_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    input_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+
+    # Relationship to parent transaction
+    transaction: Mapped["TransactionModel"] = relationship(
+        "TransactionModel",
+        back_populates="investigations",
     )

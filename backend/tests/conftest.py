@@ -13,10 +13,12 @@ from sqlalchemy.ext.asyncio import (
 )
 
 import app.db.models  # noqa: F401
+from app.api.investigations import get_default_ai_client
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import get_db_session
 from app.main import create_app
+from app.services.ai_client import MockGeminiClient
 
 
 def get_test_settings() -> Settings:
@@ -91,8 +93,8 @@ async def clean_database_after_test() -> AsyncGenerator[None, None]:
         try:
             await session.execute(
                 text(
-                    "TRUNCATE TABLE transaction_assessments, transaction_audits, "
-                    "transactions RESTART IDENTITY CASCADE;"
+                    "TRUNCATE TABLE transaction_investigations, transaction_assessments, "
+                    "transaction_audits, transactions RESTART IDENTITY CASCADE;"
                 )
             )
             await session.commit()
@@ -122,6 +124,7 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
 
     app.dependency_overrides[get_settings] = get_test_settings
     app.dependency_overrides[get_db_session] = override_get_db_session
+    app.dependency_overrides[get_default_ai_client] = lambda: MockGeminiClient()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as async_client:

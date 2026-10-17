@@ -35,6 +35,14 @@ class Settings(BaseSettings):
         "http://localhost:3000",
     ]
 
+    # Gemini & Google Cloud Vertex AI Configuration
+    GEMINI_MODEL_ID: str = "gemini-2.5-flash"
+    GCP_PROJECT_ID: str | None = None
+    GCP_LOCATION: str = "us-central1"
+    GEMINI_API_KEY: str | None = None
+    GEMINI_REQUEST_TIMEOUT_SECONDS: float = 30.0
+    GEMINI_MAX_RETRIES: int = 2
+
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8",

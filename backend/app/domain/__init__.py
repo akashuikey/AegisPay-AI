@@ -1,5 +1,14 @@
 """Domain models, rules, and business logic."""
 
+from app.domain.investigation import (
+    ConfidenceLevel,
+    EvidenceProvenance,
+    FindingCategory,
+    InvestigationFinding,
+    InvestigationModelMetadata,
+    InvestigationResult,
+    RiskSentiment,
+)
 from app.domain.risk_engine import (
     RecommendedAction,
     RiskAssessmentResult,
@@ -22,9 +31,16 @@ __all__ = [
     "ALLOWED_TRANSITIONS",
     "TERMINAL_STATES",
     "ActorType",
+    "ConfidenceLevel",
+    "EvidenceProvenance",
+    "FindingCategory",
+    "InvestigationFinding",
+    "InvestigationModelMetadata",
+    "InvestigationResult",
     "RecommendedAction",
     "RiskAssessmentResult",
     "RiskLevel",
+    "RiskSentiment",
     "TransactionEvidence",
     "TransactionState",
     "TriggeredRule",

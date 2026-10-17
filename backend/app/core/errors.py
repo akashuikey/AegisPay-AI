@@ -137,6 +137,40 @@ class ConcurrencyConflictError(ConflictError):
         self.code = "CONCURRENCY_CONFLICT"
 
 
+class AIProviderError(AppException):
+    """Raised when an external AI provider fails, times out, or returns invalid data."""
+
+    def __init__(
+        self,
+        message: str = "AI investigation provider temporarily unavailable",
+        code: str = "AI_PROVIDER_ERROR",
+        status_code: int = status.HTTP_502_BAD_GATEWAY,
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code=code,
+            status_code=status_code,
+            details=details,
+        )
+
+
+class AIConfigurationError(AppException):
+    """Raised when AI provider settings or credentials are not configured."""
+
+    def __init__(
+        self,
+        message: str = "AI provider credentials or configuration not available",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code="AI_CONFIGURATION_ERROR",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            details=details,
+        )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Register custom exception handlers on the FastAPI application."""
 

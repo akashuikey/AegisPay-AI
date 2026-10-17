@@ -6,9 +6,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.investigations import (
+    _serialize_investigation_response,
+    get_investigation_service,
+)
 from app.db.session import get_db_session
 from app.domain.risk_engine import RecommendedAction, RiskLevel
 from app.repositories.transaction_repository import TransactionRepository
+from app.schemas.investigation import InvestigationListResponse
 from app.schemas.risk import (
     AssessTransactionRequest,
     RiskAssessmentResponse,
@@ -22,6 +27,7 @@ from app.schemas.transaction import (
     TransactionResponse,
     TransitionTransactionRequest,
 )
+from app.services.investigation_service import InvestigationService
 from app.services.risk_service import RiskService
 from app.services.transaction_service import TransactionService
 
@@ -230,4 +236,25 @@ async def get_latest_transaction_assessment(
         missing_evidence=assessment.missing_evidence,
         source="backend",
         created_at=assessment.created_at,
+    )
+
+
+@router.get(
+    "/{transaction_id}/investigations",
+    response_model=InvestigationListResponse,
+    summary="List transaction investigations",
+    description=(
+        "Retrieve chronological list of AI forensic investigations conducted for a transaction."
+    ),
+)
+async def list_transaction_investigations(
+    transaction_id: UUID,
+    service: Annotated[InvestigationService, Depends(get_investigation_service)],
+) -> InvestigationListResponse:
+    """Retrieve all AI investigations for a specific transaction."""
+    records = await service.list_investigations_for_transaction(transaction_id)
+    return InvestigationListResponse(
+        transaction_id=transaction_id,
+        total_entries=len(records),
+        items=[_serialize_investigation_response(record) for record in records],
     )

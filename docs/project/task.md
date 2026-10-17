@@ -5,7 +5,7 @@
 | Phase | Description | Status |
 | :--- | :--- | :--- |
 | **Phase 1** | **Core Banking Simulator & Deterministic Risk Engine** | `DONE` |
-| **Phase 2** | **AI Investigation Agent & Multi-Modal Context Analysis** | `NOT_STARTED` |
+| **Phase 2** | **AI Investigation Agent & Multi-Modal Context Analysis** | `IN_PROGRESS` |
 | **Phase 3** | **Customer Portal & Dynamic Intervention UI** | `NOT_STARTED` |
 | **Phase 4** | **Fraud Operations Case Management & Audit Console** | `NOT_STARTED` |
 | **Phase 5** | **End-to-End Scenarios, Hardening & Demonstration** | `NOT_STARTED` |
@@ -201,8 +201,56 @@
 ---
 
 ### Phase 2: AI Investigation Agent & Multi-Modal Context Analysis
-- **Task P2-A1**: Gemini Multimodal Contextual Ingestion & Document Verification (`NOT_STARTED`)
-- **Task P2-A2**: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
+
+#### Task P2-A1: Gemini-Powered AI Investigation Service
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer (Agent 1)
+- **Status**: `DONE`
+- **Objective**: Extend the existing FastAPI backend and deterministic risk engine with a Gemini-powered forensic investigation service that analyzes supplied transaction context (transaction details, deterministic risk assessment, customer statements, document extractions, telephony telemetry, recipient intelligence) and returns validated, explainable findings.
+- **Deliverables**:
+  1. Official Google Gen AI SDK (`google-genai` v2.31.0) async client integration configured for Google Cloud Vertex AI / Gemini Developer API with typed settings (`GEMINI_MODEL_ID`, `GCP_PROJECT_ID`, `GCP_LOCATION`, `GEMINI_API_KEY`, `GEMINI_REQUEST_TIMEOUT_SECONDS`, `GEMINI_MAX_RETRIES`).
+  2. Domain value types (`FindingCategory`, `RiskSentiment`, `ConfidenceLevel`, `EvidenceProvenance`, `InvestigationFinding`, `InvestigationModelMetadata`, `InvestigationResult`).
+  3. Structured Pydantic v2 schemas: request models (`CustomerStatementEvidence`, `DocumentExtractionEvidence`, `TelephonyTelemetryEvidence`, `RecipientIntelligenceEvidence`, `InvestigateTransactionRequest`), Gemini JSON generation schema (`InvestigationFindingSchema`, `InvestigationStructuredOutput`), and response models (`InvestigationFindingResponse`, `InvestigationModelMetadataResponse`, `InvestigationResponse`, `InvestigationListResponse`).
+  4. System prompts with strict anti-prompt-injection boundaries (`<untrusted_customer_statements>`, `<untrusted_extracted_documents>`, `<untrusted_context_cues>`), instruction ignoring rules, and core operational guardrails (voice stress alone does not establish fraud; trusted beneficiary does not negate duress; AI produces forensic intelligence and never mutates transaction states).
+  5. SQLAlchemy model `TransactionInvestigationModel` with JSON columns and foreign keys (`transactions.id`, `transaction_assessments.id` with `ondelete="SET NULL"`).
+  6. Alembic async migration `0004_create_transaction_investigations` applied to PostgreSQL.
+  7. Transaction repository methods: `create_investigation`, `get_investigation_by_id`, `list_investigations_for_transaction`.
+  8. AI client architecture: `AIInvestigationClient` protocol, `VertexGeminiClient` (async `generate_content`, exponential backoff retry on 5xx, timeout handling, error mapping), and `MockGeminiClient` (offline contextual scenario synthesis and simulated failure modes).
+  9. Application service `InvestigationService` orchestrating transaction validation, context collation, Gemini generation, and persistence without mutating transaction state or version.
+  10. REST API endpoints: `POST /api/v1/investigations`, `GET /api/v1/investigations/{id}`, `GET /api/v1/transactions/{id}/investigations`.
+  11. Frontend typed API client (`frontend/src/api/investigationApi.ts`) with complete TypeScript interfaces and fetch helpers.
+  12. Unit tests (`backend/tests/unit/test_investigation_service.py`) and integration tests (`backend/tests/integration/test_investigations_api.py`) verifying prompt construction, anti-prompt injection, schema parsing, error mapping, database persistence, and transaction state non-mutation invariants.
+- **Acceptance Criteria**:
+  - [x] Official `google-genai` SDK integrated without third-party agent frameworks (no LangChain/LangGraph).
+  - [x] Structured JSON output parsed and strictly validated using Pydantic v2 schemas.
+  - [x] Prompt injection resistance verified: adversarial overrides inside customer statements are fenced and flagged as `SOCIAL_ENGINEERING`.
+  - [x] Upstream errors cleanly mapped: timeout -> HTTP 504, rate limit -> HTTP 429, provider error -> HTTP 502, missing configuration -> HTTP 503.
+  - [x] State-machine invariant strictly enforced: transaction state and version do not change after AI investigation.
+  - [x] Endpoints exposed: `POST /api/v1/investigations`, `GET /api/v1/investigations/{id}`, `GET /api/v1/transactions/{id}/investigations`.
+  - [x] All 101 backend tests and 10 frontend tests pass (111 tests total, 100% green).
+  - [x] Backend and frontend linting, formatting, and type checks pass with zero warnings or errors.
+- **Verification Commands & Results**:
+  ```bash
+  # Alembic migration
+  cd backend && uv run alembic upgrade head
+  # Applied 0004_create_transaction_investigations
+
+  # Comprehensive verification suite
+  make check-all
+  # Backend:
+  # - ruff check .: All checks passed!
+  # - ruff format --check .: 50 files already formatted
+  # - mypy app: Success: no issues found in 35 source files
+  # - pytest: 101 passed in 2.55s
+  # Frontend:
+  # - eslint .: 0 errors, 0 warnings
+  # - tsc --noEmit: 0 errors
+  # - vitest run: 10 passed in 2 test files
+  # - vite build: built in 612ms
+  ```
+
+#### Task P2-A2: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
+
+---
 
 ### Phase 3: Customer Portal & Dynamic Intervention UI
 - **Task P3-A1**: Simulated Banking Customer Payment Flow & Dynamic Intervention UI (`NOT_STARTED`)
@@ -213,3 +261,4 @@
 ### Phase 5: End-to-End Scenarios, Hardening & Demonstration
 - **Task P5-A1**: End-to-End Integration of the Six Fraud Demo Scenarios (`NOT_STARTED`)
 - **Task P5-A2**: Final Security Hardening, Audit Trail Verification & Demo Runbook (`NOT_STARTED`)
+

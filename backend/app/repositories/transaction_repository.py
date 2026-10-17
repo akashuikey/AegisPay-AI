@@ -11,6 +11,7 @@ from app.core.logging import get_logger
 from app.db.models import (
     TransactionAssessmentModel,
     TransactionAuditModel,
+    TransactionInvestigationModel,
     TransactionModel,
 )
 
@@ -163,3 +164,34 @@ class TransactionRepository:
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def create_investigation(
+        self, investigation: TransactionInvestigationModel
+    ) -> TransactionInvestigationModel:
+        """Persist an AI investigation record."""
+        self.session.add(investigation)
+        await self.session.commit()
+        await self.session.refresh(investigation)
+        return investigation
+
+    async def get_investigation_by_id(
+        self, investigation_id: UUID
+    ) -> TransactionInvestigationModel | None:
+        """Retrieve an investigation by primary key."""
+        stmt = select(TransactionInvestigationModel).where(
+            TransactionInvestigationModel.id == investigation_id
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_investigations_for_transaction(
+        self, transaction_id: UUID
+    ) -> list[TransactionInvestigationModel]:
+        """Fetch all investigations associated with a transaction ordered chronologically desc."""
+        stmt = (
+            select(TransactionInvestigationModel)
+            .where(TransactionInvestigationModel.transaction_id == transaction_id)
+            .order_by(TransactionInvestigationModel.created_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())

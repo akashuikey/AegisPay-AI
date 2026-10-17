@@ -40,13 +40,14 @@
 
 ## 3. Current Milestone & Status
 
-- **Current Milestone**: Phase 1 — Core Banking Simulator & Deterministic Risk Engine (`DONE`).
-- **Active Task**: All Phase 1 tasks complete (`P1-A1`, `P1-A2`, `P1-A3`). Ready for Phase 2 kickoff.
+- **Current Milestone**: Phase 2 — AI Investigation Agent & Multi-Modal Context Analysis (`IN_PROGRESS`).
+- **Active Task**: P2-A1 complete. Ready for P2-A2 kickoff upon user directive.
 - **Completed Tasks**:
   - **P1-A1**: Repository foundation, FastAPI backend, Aster Bank frontend prototype preservation, PostgreSQL Docker Compose, Alembic baseline, and health probes.
   - **P1-A2**: 10-state transaction workflow state machine (`INITIATED`, `ASSESSING`, `RISK_ASSESSED`, `DECISION_READY`, `VERIFICATION_REQUIRED`, `HELD_FOR_VERIFICATION`, `INVESTIGATING`, `HUMAN_REVIEW`, `SETTLED_SIMULATED`, `CANCELLED_SIMULATED`), SQLAlchemy models (`TransactionModel`, `TransactionAuditModel`), Alembic migration `0002_create_transactions_and_audits`, transaction repository with optimistic concurrency locking and customer-scoped idempotency, transaction service, Pydantic v2 schemas, REST endpoints (`/api/v1/transactions`), 63 pytest unit/integration tests, and full test isolation on `test_aegispay`.
   - **P1-A3**: Deterministic Risk Engine & Scenario-Driven Assessment. Pure domain evaluation with 11 explainable rules; mandatory guardrails (coercion overrides trusted beneficiary, voice stress is advisory only, missing evidence explicitly tagged as unknown); benchmark scenario fixtures for all 6 demo fraud scenarios; `transaction_assessments` database table with Alembic migration `0003_create_transaction_assessments`; `RiskService` with atomic lifecycle transitions (`INITIATED` -> `ASSESSING` -> `RISK_ASSESSED` -> `DECISION_READY`) and audit trail; REST endpoints `POST /api/v1/risk/evaluate`, `GET /api/v1/risk/scenarios`, `POST /api/v1/transactions/{id}/assess`, and `GET /api/v1/transactions/{id}/assessment`; frontend Aster Bank integration with risk score column, scenario switcher, and dedicated Risk Assessment drawer tab; 100% green test suite (78 backend tests, 9 Vitest frontend tests).
   - **P1-A4**: Risk Engine Verification and Demo Readiness. Verified all 6 scenario fixtures with explainable scores, rules, missing telemetry, and policy actions; confirmed active-call and voice-stress alone never block; verified coercion overrides trusted recipient; confirmed ambiguous signals remain unblocked; clearly separated live backend evaluations (`source: 'backend'`, green pill) from demo fallback (`source: 'demo_fallback'`, amber pill and warning banner); verified clean database migrations (`0001` -> `0002` -> `0003`); added tests for repeated assessments, full transition lifecycle with atomic audits, optimistic locking, and simulated-only state boundaries; 94 total tests (84 backend, 10 frontend) passing with zero failures.
+  - **P2-A1**: Gemini-Powered AI Investigation Service. Integrated official `google-genai` SDK (v2.31.0) with Python 3.14 compatibility; built domain models (`FindingCategory`, `RiskSentiment`, `ConfidenceLevel`, `EvidenceProvenance`), hardened prompt generation with strict anti-prompt-injection fences (`<untrusted_customer_statements>`, `<untrusted_extracted_documents>`), and operational guardrails; created `TransactionInvestigationModel` with Alembic migration `0004_create_transaction_investigations`; implemented `InvestigationService` and AI client abstraction (`VertexGeminiClient`, `MockGeminiClient`); exposed REST endpoints (`POST /api/v1/investigations`, `GET /api/v1/investigations/{id}`, `GET /api/v1/transactions/{id}/investigations`); created typed frontend API client (`frontend/src/api/investigationApi.ts`); added 17 new tests verifying prompt construction, anti-prompt injection, schema parsing, upstream error mapping (502, 503, 504, 429), PostgreSQL persistence, and strict transaction state non-mutation invariants (101 backend tests, 10 frontend tests, 111 total, 100% passing).
 
 ---
 
@@ -60,17 +61,23 @@
   - Missing evidence is explicitly captured as unknown, never silently assumed safe or dangerous.
   - Relative risk score (0–100), risk levels (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`), and policy recommendations (`ALLOW`, `WARN_CUSTOMER`, `REQUIRE_VERIFICATION`, `HOLD_FOR_INVESTIGATION`, `BLOCK_SIMULATED`).
   - Core guardrail: Trusted recipient status CANNOT override strong coercion indicators. Voice stress alone is NOT proof of fraud.
+- **AI Investigation Architecture & Boundaries (Phase 2)**:
+  - **Primacy of Deterministic Policies**: The LLM investigates evidence and produces intelligence; it **never** mutates transaction state or bypasses the deterministic state machine.
+  - **Prompt Injection Defense**: Customer statements and document text are treated as untrusted data inside explicit forensic tags (`<untrusted_customer_statements>`, `<untrusted_extracted_documents>`), never as instructions. Adversarial overrides are detected and flagged under `FindingCategory.SOCIAL_ENGINEERING`.
+  - **Traceability & Grounding**: Every finding cites concrete evidence references (e.g. `stmt_1`, `doc_1`, `telemetry:screen_sharing_active`) and source provenance (`customer_statement`, `document_extraction`, `device_telephony`, `consortium_registry`, `risk_engine`, `historical_ledger`).
+  - **Confidence Calibration**: Qualitative confidence score (0.0 to 1.0) reflects model assessment certainty, not calibrated statistical fraud probability.
 - **Idempotency Strategy**: Scoped per `(customer_id, idempotency_key)` backed by PostgreSQL unique constraint and canonical SHA-256 payload hash.
 - **Concurrency Control**: Optimistic version locking via integer `version` incremented on each state change.
 - **Audit Integrity**: Append-only `transaction_audits` recorded atomically in the same database transaction.
 - **Risk Assessment History**: Persisted in `transaction_assessments` table, retaining complete input snapshot, triggered rules, supporting evidence, and missing evidence.
+- **Investigation History**: Persisted in `transaction_investigations` table, linked to transactions and optional deterministic assessments (`ondelete="SET NULL"`).
 
 ---
 
 ## 5. Next Phase / Tasks (Awaiting User Directive)
 
-- **Phase 2 Kickoff**: Multi-Modal AI Investigation Agent & Coercion Voice Analysis.
-  - P2-A1: Gemini-powered investigation agent & evidence synthesis.
+- **Phase 2 Continuation**: Multi-Modal AI Investigation Agent & Coercion Voice Analysis.
   - P2-A2: Real-time coercion detection & voice interview pipeline.
   - P2-A3: Operator console AI investigation panel & simulation controls.
+
 
