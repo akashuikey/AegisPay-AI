@@ -33,6 +33,7 @@ def get_test_settings() -> Settings:
         CORS_ORIGINS=["http://testserver"],
         AUTH_JWT_SECRET="test-jwt-secret-not-for-production",
         AUTH_ACCESS_TOKEN_EXPIRE_MINUTES=60,
+        VERIFICATION_EXPOSE_DEV_OTP=True,
     )
 
 
@@ -96,7 +97,8 @@ async def clean_database_after_test() -> AsyncGenerator[None, None]:
         try:
             await session.execute(
                 text(
-                    "TRUNCATE TABLE transaction_investigations, transaction_assessments, "
+                    "TRUNCATE TABLE verification_challenges, transaction_decisions, "
+                    "transaction_investigations, transaction_assessments, "
                     "transaction_audits, transactions, operators RESTART IDENTITY CASCADE;"
                 )
             )

@@ -23,6 +23,8 @@ from app.domain.decision_policy import (
     PolicyAction,
     PolicyDecision,
     PolicyInput,
+    VerificationOutcome,
+    VerificationSignal,
     decide,
 )
 from app.domain.investigation import RiskSentiment
@@ -197,11 +199,73 @@ class DecisionWorkflowService:
             )
             return None, True
 
+    async def resolve_after_verification(
+        self,
+        transaction_id: UUID,
+        verification_outcome: VerificationOutcome,
+        correlation_id: str | None = None,
+    ) -> tuple[TransactionDecisionModel, TransactionModel, bool]:
+        """Re-evaluate a verification-required transaction after a verification outcome.
+
+        Reuses the existing assessment and investigation (no re-assessment, no
+        unnecessary new LLM call). Verification is an additional policy signal; it
+        never settles on its own and never overrides strong fraud evidence. Moves
+        the transaction VERIFICATION_REQUIRED -> INVESTIGATING -> DECISION_READY ->
+        the policy-permitted terminal/hold state, all via the existing state machine.
+        """
+        tx = await self.transaction_service.get_transaction(transaction_id)
+
+        assessment = await self.repository.get_latest_assessment(transaction_id)
+        if assessment is None:
+            # Should not happen: P2-A4 always persists an assessment before this state.
+            _, assessment = await self.risk_service.assess_transaction(
+                transaction_id=transaction_id,
+                actor_type=ActorType.SYSTEM,
+                reason="Verification re-evaluation: missing assessment recovery",
+                correlation_id=correlation_id,
+            )
+            tx = await self.transaction_service.get_transaction(transaction_id)
+
+        investigations = await self.repository.list_investigations_for_transaction(transaction_id)
+        investigation = investigations[0] if investigations else None
+
+        reason = f"Customer verification outcome: {verification_outcome.value}"
+        if tx.state == TransactionState.VERIFICATION_REQUIRED.value:
+            tx = await self.transaction_service.transition_transaction(
+                transaction_id=tx.id,
+                request=TransitionTransactionRequest(
+                    target_state=TransactionState.INVESTIGATING,
+                    actor_type=ActorType.CUSTOMER,
+                    reason=reason,
+                    correlation_id=correlation_id,
+                ),
+            )
+        if tx.state == TransactionState.INVESTIGATING.value:
+            tx = await self.transaction_service.transition_transaction(
+                transaction_id=tx.id,
+                request=TransitionTransactionRequest(
+                    target_state=TransactionState.DECISION_READY,
+                    actor_type=ActorType.POLICY_ENGINE,
+                    reason="Deterministic policy re-evaluation after verification",
+                    correlation_id=correlation_id,
+                ),
+            )
+
+        policy_input = self._build_policy_input(
+            assessment,
+            investigation,
+            provider_failed=False,
+            verification_outcome=verification_outcome,
+        )
+        decision = decide(policy_input)
+        return await self._apply_decision(tx, assessment, investigation, decision, False)
+
     def _build_policy_input(
         self,
         assessment: TransactionAssessmentModel,
         investigation: TransactionInvestigationModel | None,
         provider_failed: bool,
+        verification_outcome: VerificationOutcome | None = None,
     ) -> PolicyInput:
         triggered_rule_ids = [
             str(r.get("rule_id")) for r in assessment.triggered_rules if r.get("rule_id")
@@ -234,6 +298,7 @@ class DecisionWorkflowService:
             triggered_rule_ids=triggered_rule_ids,
             missing_evidence=list(assessment.missing_evidence),
             investigation=signal,
+            verification=VerificationSignal(outcome=verification_outcome),
         )
 
     async def _apply_decision(

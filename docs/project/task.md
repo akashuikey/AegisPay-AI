@@ -516,6 +516,72 @@
   - Not public-production ready (inherits P2-A2.1 gaps: `/auth/login` rate limiting, HTTPS/CORS).
   - Recommended next: a human decision/adjudication workflow, or the P2-A3b voice duress agent.
 
+#### Task P2-A5: Automated Verification & Safe Resolution
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer
+- **Status**: `DONE`
+- **Objective**: Implement an automated, secure, simulated customer-verification and transaction-resolution workflow extending P2-A4. Enable simulated transactions in `VERIFICATION_REQUIRED` to issue a challenge, validate simulated OTP submissions securely (keyed HMAC-SHA256 digest, server-side expiry, bounded attempts, single-use consumption under concurrency), and automatically re-evaluate policy to resolve the transaction. Preserves fraud guardrails: verification is an additional signal that never overrides strong fraud evidence. See [ADR-004](../decisions/ADR-004-customer-verification-lifecycle.md).
+- **Deliverables**:
+  1. `backend/app/core/config.py` & `.env.example`: configuration settings (`VERIFICATION_OTP_LENGTH=6`, `VERIFICATION_CHALLENGE_TTL_SECONDS=300`, `VERIFICATION_MAX_ATTEMPTS=5`, `VERIFICATION_SESSION_TTL_SECONDS=600`, `VERIFICATION_EXPOSE_DEV_OTP=True` for dev/test).
+  2. `backend/app/core/security.py`: cryptographically secure OTP generator (`generate_otp`), keyed HMAC-SHA256 digest helpers (`hash_otp`, `verify_otp`), and distinct customer verification session token creation and verification (`create_customer_verification_token`, `decode_customer_verification_token` with `type="customer_verification"`).
+  3. `backend/app/core/errors.py`: `VerificationError` with machine-readable error codes (`VERIFICATION_NOT_REQUIRED`, `VERIFICATION_CHALLENGE_INVALID`, `VERIFICATION_EXPIRED`, `VERIFICATION_ALREADY_RESOLVED`).
+  4. `backend/app/domain/decision_policy.py`: extended with `VerificationOutcome` (`SUCCEEDED`, `FAILED`, `EXPIRED`, `EXHAUSTED`), `VerificationSignal`, and `_apply_verification` rule. `SUCCEEDED` satisfies `REQUIRE_VERIFICATION` to `ALLOW`, but never downgrades `HOLD_FOR_INVESTIGATION` or `BLOCK` (attaches `VERIFICATION_INSUFFICIENT_RESIDUAL_RISK`). Failed/expired/exhausted outcomes escalate to `HOLD_FOR_INVESTIGATION` and never settle.
+  5. `backend/app/db/models.py`: `VerificationChallengeModel` entity with indexed transaction binding, decision foreign key, attempt counts, status, version, and expiry.
+  6. Alembic async migration `0008_create_verification_challenges.py`: applied and verified across clean DB, downgrade/re-upgrade, and dev database.
+  7. `backend/app/repositories/transaction_repository.py`: challenge methods (`create_challenge`, `get_challenge_by_id`, `get_latest_pending_challenge`, `update_challenge_fields` with optimistic version guard, `set_challenge_decision`).
+  8. `backend/app/services/decision_workflow_service.py`: added `resolve_after_verification` to execute valid transitions (`VERIFICATION_REQUIRED` → `INVESTIGATING` → `DECISION_READY`), rebuild policy inputs with verification signal, evaluate `decide()`, apply decision and persist record.
+  9. `backend/app/services/verification_service.py`: orchestrates challenge creation, status retrieval, submission verification, single-use consumption, attempt tracking, and policy re-evaluation handoff.
+  10. REST API endpoints:
+      - `POST /api/v1/transactions/{id}/verification`: operator-authenticated route to create/retrieve active challenge. Returns customer session token and dev OTP (when enabled).
+      - `GET /api/v1/transactions/{id}/verification/{challenge_id}`: operator-authenticated challenge status route.
+      - `POST /api/v1/verification/{challenge_id}/submit`: customer-session-authenticated route (requires `type="customer_verification"` bearer token) to submit simulated OTP and re-evaluate policy.
+  11. Frontend API client `frontend/src/api/verificationApi.ts`: typed helpers for challenge creation, status check, and customer-session submission.
+  12. Frontend UI component `frontend/src/components/VerificationPanel.tsx`: integrated into the drawer under the AI Investigation tab. Displays simulated challenge state, dev-mode OTP pill, attempt counter, numeric OTP input with non-digit stripping, and policy re-evaluation outcome with explicit simulated outcome labeling.
+  13. Comprehensive test suites:
+      - Policy unit tests in `backend/tests/unit/test_decision_policy.py` (16 tests).
+      - Verification integration tests in `backend/tests/integration/test_verification_api.py` (15 tests).
+      - Frontend unit & integration tests in `frontend/src/__tests__/VerificationPanel.test.tsx` (5 tests).
+- **Acceptance Criteria**:
+  - [x] Eligible `VERIFICATION_REQUIRED` transaction creates a simulated challenge.
+  - [x] Valid OTP submission triggers automated policy re-evaluation.
+  - [x] Successful verification with acceptable residual risk permits simulated settlement (`ALLOW`).
+  - [x] Successful verification with strong residual fraud evidence remains held (`HOLD_FOR_INVESTIGATION`).
+  - [x] Incorrect OTP submission increments attempts and preserves `PENDING` state.
+  - [x] Exhausted attempts escalate to `HOLD_FOR_INVESTIGATION` and cannot be retried.
+  - [x] Expired challenges reject submissions with `VERIFICATION_EXPIRED`.
+  - [x] Consumed challenge cannot be reused; replay returns existing decision idempotently.
+  - [x] Token and challenge binding prevents cross-transaction or cross-challenge reuse (HTTP 404).
+  - [x] Distinct customer verification session token enforces separation from operator auth.
+  - [x] Plaintext OTP is never stored in database (HMAC-SHA256 digest).
+  - [x] Optimistic locking on challenge version prevents concurrent double-consumption.
+  - [x] Terminal transactions cannot be reopened through verification.
+  - [x] All 193 backend tests and 39 frontend tests pass (232 total tests, 100% green).
+  - [x] Backend and frontend linting, formatting, and type checks pass with zero warnings or errors.
+- **Verification Commands & Results**:
+  ```bash
+  # Clean database migration verification (upgrade -> downgrade -> re-upgrade)
+  POSTGRES_DB=p2a5_clean_test uv run alembic upgrade head
+  POSTGRES_DB=p2a5_clean_test uv run alembic downgrade -1
+  POSTGRES_DB=p2a5_clean_test uv run alembic upgrade head
+
+  # Full repository verification suite
+  make check-all
+  # Backend:
+  # - ruff check .: All checks passed!
+  # - ruff format --check .: 71 files already formatted
+  # - mypy app: Success: no issues found in 51 source files
+  # - pytest: 193 passed in 13.65s
+  # Frontend:
+  # - eslint .: 0 errors, 0 warnings
+  # - tsc --noEmit: 0 errors
+  # - vitest run: 39 passed in 6 test files
+  # - vite build: built in 579ms
+  ```
+- **Execution Log, Security & Blocker Notes**:
+  - **Primacy of Deterministic Policy**: Verified that verification success satisfies `REQUIRE_VERIFICATION` but cannot bypass `HOLD_FOR_INVESTIGATION` or `BLOCK` when adverse evidence is present.
+  - **Identity Separation**: Operator access tokens (`type="operator_access"`) cannot be used to submit customer verification challenges, and customer verification session tokens (`type="customer_verification"`) cannot access operator console APIs.
+  - **Dev-Only Secret Exposure**: Plaintext OTP is exposed strictly via `dev_otp` when `VERIFICATION_EXPOSE_DEV_OTP=True` for simulated prototyping. In production configuration, `dev_otp` is `None`.
+  - Zero P2-A3b voice duress code initiated. All acceptance criteria satisfied.
+
 #### Task P2-A3b: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
 
 ---

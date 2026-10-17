@@ -18,6 +18,7 @@ from app.db.models import (
     TransactionDecisionModel,
     TransactionInvestigationModel,
     TransactionModel,
+    VerificationChallengeModel,
 )
 
 logger = get_logger(__name__)
@@ -200,6 +201,77 @@ class TransactionRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def create_challenge(
+        self, challenge: VerificationChallengeModel
+    ) -> VerificationChallengeModel:
+        """Persist a new verification challenge."""
+        self.session.add(challenge)
+        await self.session.commit()
+        await self.session.refresh(challenge)
+        return challenge
+
+    async def get_challenge_by_id(self, challenge_id: UUID) -> VerificationChallengeModel | None:
+        """Fetch a verification challenge by primary key."""
+        stmt = select(VerificationChallengeModel).where(
+            VerificationChallengeModel.id == challenge_id
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_latest_pending_challenge(
+        self, transaction_id: UUID
+    ) -> VerificationChallengeModel | None:
+        """Fetch the latest PENDING challenge for a transaction, if any."""
+        stmt = (
+            select(VerificationChallengeModel)
+            .where(
+                VerificationChallengeModel.transaction_id == transaction_id,
+                VerificationChallengeModel.status == "PENDING",
+            )
+            .order_by(VerificationChallengeModel.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def update_challenge_fields(
+        self, challenge_id: UUID, expected_version: int, values: dict[str, Any]
+    ) -> bool:
+        """Atomically update a challenge guarded by its version (optimistic lock).
+
+        Returns True iff exactly one row was updated (the caller won the race).
+        Always bumps the version. Commits on success, rolls back otherwise.
+        """
+        payload = dict(values)
+        payload["version"] = expected_version + 1
+        stmt = (
+            update(VerificationChallengeModel)
+            .where(
+                VerificationChallengeModel.id == challenge_id,
+                VerificationChallengeModel.version == expected_version,
+            )
+            .values(**payload)
+        )
+        result = await self.session.execute(stmt)
+        won = isinstance(result, CursorResult) and result.rowcount == 1
+        if won:
+            await self.session.commit()
+        else:
+            await self.session.rollback()
+        return won
+
+    async def set_challenge_decision(
+        self, challenge_id: UUID, decision_id: UUID, status: str
+    ) -> None:
+        """Link a resolved decision to the challenge and set its terminal status."""
+        stmt = (
+            update(VerificationChallengeModel)
+            .where(VerificationChallengeModel.id == challenge_id)
+            .values(decision_id=decision_id, status=status, consumed_at=func.now())
+        )
+        await self.session.execute(stmt)
+        await self.session.commit()
 
     async def create_decision(self, decision: TransactionDecisionModel) -> TransactionDecisionModel:
         """Persist an automated workflow decision record."""

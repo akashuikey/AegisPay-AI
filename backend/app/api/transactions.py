@@ -12,6 +12,7 @@ from app.api.investigations import (
     get_default_ai_client,
     get_investigation_service,
 )
+from app.api.verification import get_verification_service
 from app.db.models import TransactionDecisionModel
 from app.db.session import get_db_session
 from app.domain.decision_policy import PolicyAction
@@ -39,11 +40,13 @@ from app.schemas.transaction import (
     TransactionResponse,
     TransitionTransactionRequest,
 )
+from app.schemas.verification import CreateChallengeResponse, VerificationStatusResponse
 from app.services.ai_client import AIInvestigationClient
 from app.services.decision_workflow_service import DecisionWorkflowService
 from app.services.investigation_service import InvestigationService
 from app.services.risk_service import RiskService
 from app.services.transaction_service import TransactionService
+from app.services.verification_service import VerificationService
 
 router = APIRouter(prefix="/transactions", tags=["Transactions"])
 
@@ -470,3 +473,73 @@ async def get_transaction_decision(
         raise NotFoundError(f"No automated decision found for transaction '{transaction_id}'")
     tx = await service.transaction_service.get_transaction(transaction_id)
     return _serialize_decision(decision, tx.state)
+
+
+def _serialize_challenge_status(
+    challenge: object, transaction_state: str
+) -> "VerificationStatusResponse":
+    attempts_remaining = max(challenge.max_attempts - challenge.attempt_count, 0)  # type: ignore[attr-defined]
+    return VerificationStatusResponse(
+        challenge_id=challenge.id,  # type: ignore[attr-defined]
+        transaction_id=challenge.transaction_id,  # type: ignore[attr-defined]
+        status=challenge.status,  # type: ignore[attr-defined]
+        attempt_count=challenge.attempt_count,  # type: ignore[attr-defined]
+        max_attempts=challenge.max_attempts,  # type: ignore[attr-defined]
+        attempts_remaining=attempts_remaining,
+        expires_at=challenge.expires_at,  # type: ignore[attr-defined]
+        verified_at=challenge.verified_at,  # type: ignore[attr-defined]
+        decision_id=challenge.decision_id,  # type: ignore[attr-defined]
+        transaction_state=transaction_state,
+    )
+
+
+@router.post(
+    "/{transaction_id}/verification",
+    response_model=CreateChallengeResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create or retrieve a verification challenge",
+    description=(
+        "Issues a SIMULATED OTP challenge for a transaction that requires verification, or "
+        "returns the active challenge. Returns a distinct customer verification session token. "
+        "The OTP itself is only returned in dev mode (VERIFICATION_EXPOSE_DEV_OTP)."
+    ),
+)
+async def create_verification_challenge(
+    transaction_id: UUID,
+    response: Response,
+    service: Annotated[VerificationService, Depends(get_verification_service)],
+) -> CreateChallengeResponse:
+    """Create or retrieve the active simulated verification challenge for a transaction."""
+    challenge, dev_otp, token, expires_in = await service.create_or_get_challenge(transaction_id)
+    if dev_otp is None and challenge.attempt_count == 0 and challenge.status == "PENDING":
+        # Retrieved an existing active challenge rather than creating a new one.
+        response.status_code = status.HTTP_200_OK
+    return CreateChallengeResponse(
+        challenge_id=challenge.id,
+        transaction_id=challenge.transaction_id,
+        status=challenge.status,
+        attempt_count=challenge.attempt_count,
+        max_attempts=challenge.max_attempts,
+        attempts_remaining=max(challenge.max_attempts - challenge.attempt_count, 0),
+        expires_at=challenge.expires_at,
+        customer_session_token=token,
+        session_expires_in=expires_in,
+        dev_otp=dev_otp,
+    )
+
+
+@router.get(
+    "/{transaction_id}/verification/{challenge_id}",
+    response_model=VerificationStatusResponse,
+    summary="Get verification challenge status",
+    description="Retrieve the status of a simulated verification challenge for a transaction.",
+)
+async def get_verification_status(
+    transaction_id: UUID,
+    challenge_id: UUID,
+    service: Annotated[VerificationService, Depends(get_verification_service)],
+) -> VerificationStatusResponse:
+    """Fetch the status of a verification challenge (operator console)."""
+    challenge = await service.get_status(transaction_id, challenge_id)
+    tx = await service.transaction_service.get_transaction(transaction_id)
+    return _serialize_challenge_status(challenge, tx.state)

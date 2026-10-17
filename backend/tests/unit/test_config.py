@@ -1,10 +1,11 @@
-"""Unit tests for configuration and settings."""
+import pytest
 
 from app.core.config import Settings
 
 
-def test_default_settings() -> None:
+def test_default_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test default values of application settings."""
+    monkeypatch.delenv("POSTGRES_PORT", raising=False)
     settings = Settings(_env_file=None)
     assert settings.APP_NAME == "AegisPay AI"
     assert settings.APP_ENV == "development"

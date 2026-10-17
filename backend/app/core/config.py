@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     AUTH_BOOTSTRAP_OPERATOR_USERNAME: str | None = None
     AUTH_BOOTSTRAP_OPERATOR_PASSWORD: str | None = None
 
+    # Simulated customer verification (P2-A5). Challenge is a simulated OTP — NOT a
+    # real bank authentication channel.
+    VERIFICATION_OTP_LENGTH: int = 6
+    VERIFICATION_CHALLENGE_TTL_SECONDS: int = 300
+    VERIFICATION_MAX_ATTEMPTS: int = 5
+    VERIFICATION_SESSION_TTL_SECONDS: int = 600
+    # Dev-only: expose the simulated OTP in the challenge-creation response so the
+    # demo can complete the flow. MUST be false in production. Defaults to false.
+    VERIFICATION_EXPOSE_DEV_OTP: bool = False
+
     model_config = SettingsConfigDict(
         env_file=(".env", "../.env"),
         env_file_encoding="utf-8",

@@ -235,6 +235,24 @@ class AuthConfigurationError(AppException):
         )
 
 
+class VerificationError(AppException):
+    """Raised for simulated customer-verification challenge lifecycle failures."""
+
+    def __init__(
+        self,
+        message: str,
+        code: str = "VERIFICATION_ERROR",
+        status_code: int = status.HTTP_400_BAD_REQUEST,
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code=code,
+            status_code=status_code,
+            details=details,
+        )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Register custom exception handlers on the FastAPI application."""
 

@@ -172,3 +172,96 @@ def test_unknown_sentiment_with_missing_info_requires_verification() -> None:
         )
     )
     assert result.action == PolicyAction.REQUIRE_VERIFICATION
+
+
+# --- Verification signal (P2-A5) -------------------------------------------
+
+from app.domain.decision_policy import VerificationOutcome, VerificationSignal  # noqa: E402
+
+
+def _input_v(
+    *,
+    score: int,
+    level: RiskLevel,
+    action: RecommendedAction,
+    rules: list[str] | None = None,
+    verification: VerificationOutcome | None = None,
+) -> PolicyInput:
+    return PolicyInput(
+        risk_score=score,
+        risk_level=level,
+        recommended_action=action,
+        triggered_rule_ids=rules or [],
+        verification=VerificationSignal(outcome=verification),
+    )
+
+
+def test_verification_success_satisfies_medium_tier() -> None:
+    result = decide(
+        _input_v(
+            score=30,
+            level=RiskLevel.MEDIUM,
+            action=RecommendedAction.REQUIRE_VERIFICATION,
+            verification=VerificationOutcome.SUCCEEDED,
+        )
+    )
+    assert result.action == PolicyAction.ALLOW
+    assert "VERIFICATION_SATISFIED" in result.reason_codes
+
+
+def test_verification_success_does_not_override_strong_hold() -> None:
+    result = decide(
+        _input_v(
+            score=100,
+            level=RiskLevel.CRITICAL,
+            action=RecommendedAction.HOLD_FOR_INVESTIGATION,
+            rules=["RULE_COERCION_AUTHORITY_PRESSURE"],
+            verification=VerificationOutcome.SUCCEEDED,
+        )
+    )
+    assert result.action == PolicyAction.HOLD_FOR_INVESTIGATION
+    assert "VERIFICATION_INSUFFICIENT_RESIDUAL_RISK" in result.reason_codes
+
+
+def test_verification_success_does_not_override_block() -> None:
+    result = decide(
+        _input_v(
+            score=90,
+            level=RiskLevel.CRITICAL,
+            action=RecommendedAction.HOLD_FOR_INVESTIGATION,
+            rules=["RULE_FLAGGED_MULE_ACCOUNT"],
+            verification=VerificationOutcome.SUCCEEDED,
+        )
+    )
+    assert result.action == PolicyAction.BLOCK
+
+
+def test_verification_failure_escalates_to_hold_and_never_settles() -> None:
+    for outcome in (
+        VerificationOutcome.FAILED,
+        VerificationOutcome.EXPIRED,
+        VerificationOutcome.EXHAUSTED,
+    ):
+        result = decide(
+            _input_v(
+                score=30,
+                level=RiskLevel.MEDIUM,
+                action=RecommendedAction.REQUIRE_VERIFICATION,
+                verification=outcome,
+            )
+        )
+        assert result.action == PolicyAction.HOLD_FOR_INVESTIGATION
+        assert result.action != PolicyAction.ALLOW
+        assert f"VERIFICATION_{outcome.value}" in result.reason_codes
+
+
+def test_verification_exhausted_on_low_risk_still_holds() -> None:
+    result = decide(
+        _input_v(
+            score=5,
+            level=RiskLevel.LOW,
+            action=RecommendedAction.ALLOW,
+            verification=VerificationOutcome.EXHAUSTED,
+        )
+    )
+    assert result.action == PolicyAction.HOLD_FOR_INVESTIGATION

@@ -185,6 +185,14 @@ class TransactionModel(Base):
         order_by="TransactionDecisionModel.created_at.desc()",
     )
 
+    # Relationship to simulated verification challenges
+    verification_challenges: Mapped[list["VerificationChallengeModel"]] = relationship(
+        "VerificationChallengeModel",
+        back_populates="transaction",
+        cascade="all, delete-orphan",
+        order_by="VerificationChallengeModel.created_at.desc()",
+    )
+
 
 class TransactionAuditModel(Base):
     """Append-only audit trail recording state transitions and lifecycle events."""
@@ -457,6 +465,62 @@ class TransactionDecisionModel(Base):
     transaction: Mapped["TransactionModel"] = relationship(
         "TransactionModel",
         back_populates="decisions",
+    )
+
+
+class VerificationChallengeModel(Base):
+    """Simulated customer verification challenge (OTP) bound to a transaction.
+
+    The plaintext OTP is NEVER stored — only a keyed HMAC digest. The ``version``
+    column provides optimistic single-use consumption under concurrency.
+    """
+
+    __tablename__ = "verification_challenges"
+    __table_args__ = (Index("ix_verification_challenges_tx_status", "transaction_id", "status"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    otp_digest: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transaction_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    transaction: Mapped["TransactionModel"] = relationship(
+        "TransactionModel",
+        back_populates="verification_challenges",
     )
 
 

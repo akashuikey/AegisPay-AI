@@ -54,6 +54,15 @@ _ACTION_SEVERITY: dict[PolicyAction, int] = {
 }
 
 
+class VerificationOutcome(StrEnum):
+    """Outcome of a simulated customer verification challenge, as a policy signal."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+    EXHAUSTED = "EXHAUSTED"
+
+
 @dataclass(frozen=True)
 class InvestigationSignal:
     """Structured, validated investigation inputs the policy may consider."""
@@ -67,6 +76,13 @@ class InvestigationSignal:
 
 
 @dataclass(frozen=True)
+class VerificationSignal:
+    """Simulated customer verification outcome as an additional (non-authorizing) signal."""
+
+    outcome: VerificationOutcome | None = None
+
+
+@dataclass(frozen=True)
 class PolicyInput:
     """Validated structured inputs to the decision policy."""
 
@@ -76,6 +92,7 @@ class PolicyInput:
     triggered_rule_ids: list[str] = field(default_factory=list)
     missing_evidence: list[str] = field(default_factory=list)
     investigation: InvestigationSignal = field(default_factory=InvestigationSignal)
+    verification: VerificationSignal = field(default_factory=VerificationSignal)
 
 
 @dataclass(frozen=True)
@@ -125,6 +142,38 @@ def _investigation_implied_action(signal: InvestigationSignal) -> PolicyAction |
         case _:
             # BENIGN or None: no escalation (and never a downgrade).
             return None
+
+
+def _apply_verification(
+    action: PolicyAction, outcome: VerificationOutcome | None, reason_codes: list[str]
+) -> PolicyAction:
+    """Fold the verification outcome into the deterministic action.
+
+    - SUCCEEDED satisfies the REQUIRE_VERIFICATION gate (-> ALLOW) but never
+      downgrades a HOLD or BLOCK driven by strong fraud evidence.
+    - FAILED / EXPIRED / EXHAUSTED can never authorize settlement: a transaction
+      that would otherwise ALLOW or merely REQUIRE_VERIFICATION is escalated to
+      HOLD_FOR_INVESTIGATION.
+    """
+    if outcome is None:
+        return action
+
+    if outcome == VerificationOutcome.SUCCEEDED:
+        if action == PolicyAction.REQUIRE_VERIFICATION:
+            reason_codes.append("VERIFICATION_SATISFIED")
+            return PolicyAction.ALLOW
+        if action in (PolicyAction.HOLD_FOR_INVESTIGATION, PolicyAction.BLOCK):
+            reason_codes.append("VERIFICATION_INSUFFICIENT_RESIDUAL_RISK")
+        else:
+            reason_codes.append("VERIFICATION_SUCCEEDED")
+        return action
+
+    # FAILED / EXPIRED / EXHAUSTED
+    reason_codes.append(f"VERIFICATION_{outcome.value}")
+    if _severity(action) < _severity(PolicyAction.HOLD_FOR_INVESTIGATION):
+        reason_codes.append("VERIFICATION_FAILED_HOLD")
+        return PolicyAction.HOLD_FOR_INVESTIGATION
+    return action
 
 
 def _explanation(action: PolicyAction, inp: PolicyInput) -> str:
@@ -185,6 +234,11 @@ def decide(inp: PolicyInput) -> PolicyDecision:
         if _severity(action) < _severity(PolicyAction.REQUIRE_VERIFICATION):
             action = PolicyAction.REQUIRE_VERIFICATION
             reason_codes.append("MISSING_EVIDENCE_REQUIRE_VERIFICATION")
+
+    # Verification is an additional signal applied last; it resolves the
+    # verification gate but never overrides strong fraud evidence (HOLD/BLOCK)
+    # and never authorizes settlement on its own.
+    action = _apply_verification(action, inp.verification.outcome, reason_codes)
 
     return PolicyDecision(
         policy_version=POLICY_VERSION,
