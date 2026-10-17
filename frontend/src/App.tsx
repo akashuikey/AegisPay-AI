@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { BackendHealthBadge } from './components/BackendHealthBadge';
 import { InvestigationConversationPanel } from './components/InvestigationConversationPanel';
+import { InvestigationReviewPanel } from './components/InvestigationReviewPanel';
 import {
   evaluateRiskApi,
   evaluateRiskLocally,
@@ -2614,11 +2615,20 @@ function TransactionDrawer({
         )}
 
         {tab === 'AI Investigation' && (
-          <InvestigationConversationPanel
-            transactionId={tx.id}
-            transactionRecipient={tx.recipient}
-            transactionAmount={tx.amount}
-          />
+          <>
+            <InvestigationReviewPanel
+              transactionId={tx.id}
+              transactionReference={tx.reference}
+              transactionStatus={tx.payment}
+              riskScore={tx.assessment?.risk_score ?? null}
+              riskLevel={tx.assessment?.risk_level ?? null}
+            />
+            <InvestigationConversationPanel
+              transactionId={tx.id}
+              transactionRecipient={tx.recipient}
+              transactionAmount={tx.amount}
+            />
+          </>
         )}
 
         {tab === 'Decision & history' && (

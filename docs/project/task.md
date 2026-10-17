@@ -404,7 +404,65 @@
     deployment assumption (bearer tokens require transport encryption); `CORS_ORIGINS` and a
     strong `AUTH_JWT_SECRET` must be set per environment. Not public-production ready.
 
-#### Task P2-A3: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
+#### Task P2-A3: Operator Investigation Review Panel
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer
+- **Status**: `DONE`
+- **Objective**: Add a polished, read-oriented operator investigation review experience to the
+  Aster Bank console so operators can review existing AI investigation results — overview, key
+  findings, evidence provenance, and uncertainty/missing information — and move into the existing
+  P2-A2 conversation to investigate further. Built on `23d88d4`. **Frontend-only**; reuses P2-A1/
+  P2-A2/P2-A2.1 APIs, auth, and styling. No backend change, no migration.
+- **Deliverables**:
+  1. `frontend/src/components/InvestigationReviewPanel.tsx` — fetches existing investigations via
+     the authenticated `fetchInvestigationsForTransactionApi` (routes through `apiFetch`), presents
+     the latest investigation, and never auto-launches an investigation.
+     - A. Overview: transaction ref, simulated status, deterministic risk score/level (from
+       `tx.assessment`, "Not available" when absent), investigation timestamp, AI sentiment,
+       AI confidence (qualitative, explicitly **not** a calibrated fraud probability), model/provider.
+     - B. Key findings: severity-sorted; category, severity, explanation, evidence refs, and a
+       provenance trust classification (independently verified / observed signal / customer-reported
+       & unverified / model inference).
+     - C. Evidence & provenance index: derived from finding citations; shows each reference, its
+       provenance class, and which findings cite it. Clearly states source content is not retained
+       in the investigation record (no fabrication) and points to the conversation for live evidence.
+     - D. Uncertainty & missing information: dedicated section for missing information, unresolved
+       questions, contradictory/mitigating evidence, and suggested next steps.
+  2. Integrated into the existing `AI Investigation` drawer tab in `App.tsx`, rendered above the
+     reused `InvestigationConversationPanel` (single conversation implementation — not duplicated).
+  3. Distinct loading / empty / error / partial-data states; a 404 (unknown/demo transaction) is
+     shown as empty, not an error; a manual Refresh re-fetches with an in-flight guard to prevent
+     duplicate requests from rapid clicks; latest-first selection avoids stale data.
+  4. Frontend tests `frontend/src/__tests__/InvestigationReviewPanel.test.tsx` (12 tests) covering
+     the required scenarios (overview, findings, provenance/unverified distinction, evidence index,
+     uncertainty visibility, empty, 404-as-empty, partial fields, error, authenticated client use,
+     duplicate-click prevention, refresh-after-further-investigation).
+- **Security / boundaries**: all requests use the authenticated `apiFetch` client; no protected
+  endpoint is called without it; no frontend-only authorization; evidence/model text rendered as
+  escaped React text (no `dangerouslySetInnerHTML`); no evidence-integrity checks weakened; no
+  transaction state transitions, holds, releases, or AI-triggered actions introduced (read-oriented).
+- **Verification Commands & Results**:
+  ```bash
+  cd frontend
+  npm run lint        # clean
+  npm run typecheck   # clean
+  npm run test        # 29 passed (5 files; +12 new review-panel tests)
+  npm run build       # built OK
+  cd ../backend       # no backend changes in this milestone
+  uv run ruff check . # All checks passed!
+  uv run mypy app     # Success: no issues found in 43 source files
+  POSTGRES_PORT=5433 uv run pytest  # 148 passed (DB on 5433; test_config default-port
+                                    # assertion passes without the override)
+  ```
+- **Known limitations**:
+  - Evidence *content* is not persisted on the investigation record, so the evidence section shows
+    the citation/provenance index and directs the operator to the conversation for underlying text
+    (deliberate: no new table/migration for presentation, per scope).
+  - Seeded demo transactions are not backend records, so the panel shows the empty state for them;
+    real backend transactions with a stored investigation render the full review.
+  - Recommended next milestone: P2-A3 voice duress agent (still NOT_STARTED) or an authorized human
+    decision/adjudication workflow that writes state via the existing state machine.
+
+#### Task P2-A3b: Gemini Real-Time Voice Duress & Psychological Analysis Agent (`NOT_STARTED`)
 
 ---
 
