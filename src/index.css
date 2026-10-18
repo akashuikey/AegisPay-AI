@@ -700,28 +700,29 @@ tr:last-child td {border-bottom:0;}
 }
 
 .hub-center-badge {
-  width: 140px;
-  height: 140px;
+  width: 70px;
+  height: 70px;
   border-radius: 50%;
   background: #ffffff;
-  border: 2px solid #38bdf8;
+  border: 1.5px solid #38bdf8;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 12px;
-  box-shadow: 0 10px 25px rgba(2, 132, 199, 0.12);
+  padding: 4px;
+  box-shadow: 0 4px 14px rgba(2, 132, 199, 0.12);
   z-index: 10;
   position: relative;
+  flex-shrink: 0;
 }
 
 .hub-center-badge:after {
   content: '';
   position: absolute;
-  inset: -10px;
+  inset: -5px;
   border-radius: 50%;
-  border: 1px dashed rgba(56, 189, 248, 0.4);
+  border: 1px dashed rgba(56, 189, 248, 0.35);
   animation: rotate-slow 20s linear infinite;
 }
 
@@ -731,34 +732,43 @@ tr:last-child td {border-bottom:0;}
 
 .hub-node-card {
   position: absolute;
-  width: 175px;
+  width: 94px;
+  max-width: 98px;
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  padding: 10px 12px;
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
+  border-radius: 6px;
+  padding: 4px 6px;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
   z-index: 5;
+  box-sizing: border-box;
 }
 
-.hub-node-card.top-left { top: 20px; left: 24px; }
-.hub-node-card.top-right { top: 20px; right: 24px; }
-.hub-node-card.bottom-left { bottom: 20px; left: 24px; }
-.hub-node-card.bottom-right { bottom: 20px; right: 24px; }
+.hub-node-card.top-left { top: 10px; left: 8px; }
+.hub-node-card.top-right { top: 10px; right: 8px; }
+.hub-node-card.bottom-left { bottom: 10px; left: 8px; }
+.hub-node-card.bottom-right { bottom: 10px; right: 8px; }
 
 .hub-node-title {
   font-weight: 700;
-  font-size: 11px;
+  font-size: 8px;
   color: #0f172a;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 3px;
   margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .hub-node-desc {
-  font-size: 9.5px;
+  font-size: 6.8px;
   color: #64748b;
-  line-height: 1.35;
+  line-height: 1.15;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* Center Bottom: Live Payment Investigation */

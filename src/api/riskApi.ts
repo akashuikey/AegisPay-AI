@@ -5,16 +5,18 @@
 
 import { config } from '../config';
 import { apiFetch } from './authApi';
-import {
+import type {
   RiskLevel,
   RecommendedAction,
   TriggeredRuleResponse,
   RiskAssessmentResponse,
   TransactionEvidenceInput,
   DemoScenarioDefinition,
+} from '../domain/riskScoring';
+import {
   SCENARIO_CATALOG,
   evaluateRiskLocally,
-} from '../domain/riskScoring.ts';
+} from '../domain/riskScoring';
 
 export type {
   RiskLevel,
