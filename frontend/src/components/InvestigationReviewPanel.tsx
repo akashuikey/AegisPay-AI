@@ -147,6 +147,7 @@ export function InvestigationReviewPanel({
   const evaluateInFlight = useRef<boolean>(false);
 
   const loadDecision = useCallback(async () => {
+    if (!transactionId || transactionId.startsWith('AST-')) return;
     try {
       const latest = await getLatestDecisionApi(transactionId);
       setDecision(latest);
@@ -157,7 +158,7 @@ export function InvestigationReviewPanel({
   }, [transactionId]);
 
   const handleEvaluate = useCallback(async () => {
-    if (evaluateInFlight.current) return;
+    if (!transactionId || transactionId.startsWith('AST-') || evaluateInFlight.current) return;
     evaluateInFlight.current = true;
     setEvaluating(true);
     setEvaluateError(null);
@@ -178,7 +179,7 @@ export function InvestigationReviewPanel({
   const loadInvestigationsRef = useRef<(() => Promise<void>) | null>(null);
 
   const loadInvestigations = useCallback(async () => {
-    if (inFlight.current) return;
+    if (!transactionId || transactionId.startsWith('AST-') || inFlight.current) return;
     inFlight.current = true;
     setState((prev) => (prev === 'loaded' ? 'loaded' : 'loading'));
     setError(null);

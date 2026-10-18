@@ -7,13 +7,13 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.investigations import get_default_ai_client
-from app.core.errors import NotFoundError
 from app.db.models import TransactionCoercionAnalysisModel
 from app.db.session import get_db_session
 from app.domain.coercion import CoercionCategory, CoercionSeverity
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.coercion import (
     AnalyzeCoercionRequest,
+    CoercionAnalysisLifecycleResponse,
     CoercionAnalysisResponse,
     CoercionFindingResponse,
     VoiceStressResponse,
@@ -125,16 +125,23 @@ async def analyze_transaction_coercion(
 
 @router.get(
     "/{transaction_id}/coercion",
-    response_model=CoercionAnalysisResponse,
-    summary="Get latest coercion analysis for a transaction",
-    description="Retrieve the most recent forensic coercion analysis for a transaction.",
+    response_model=CoercionAnalysisLifecycleResponse,
+    summary="Get coercion-analysis lifecycle state for a transaction",
+    description=(
+        "Returns the coercion-analysis lifecycle for a transaction: not_started, "
+        "in_progress, completed, or failed, with the analysis payload when available. "
+        "A missing transaction returns 404; a missing analysis is reported explicitly "
+        "and never misrepresented as proof of safety."
+    ),
 )
 async def get_latest_coercion_analysis(
     transaction_id: UUID,
     service: Annotated[CoercionService, Depends(get_coercion_service)],
-) -> CoercionAnalysisResponse:
-    """Fetch the latest coercion analysis for a transaction."""
-    analysis = await service.get_latest_analysis(transaction_id)
-    if analysis is None:
-        raise NotFoundError(f"No coercion analysis found for transaction '{transaction_id}'")
-    return serialize_coercion_analysis(analysis)
+) -> CoercionAnalysisLifecycleResponse:
+    """Fetch the coercion-analysis lifecycle state for a transaction."""
+    lifecycle_status, detail, analysis = await service.get_analysis_lifecycle(transaction_id)
+    return CoercionAnalysisLifecycleResponse(
+        status=lifecycle_status,
+        detail=detail,
+        analysis=serialize_coercion_analysis(analysis) if analysis is not None else None,
+    )

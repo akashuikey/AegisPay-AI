@@ -166,4 +166,79 @@ describe("AegisPay AI / Aster Bank Console & Phone Simulator", () => {
       expect(screen.queryByTestId("assessment-fallback-banner")).not.toBeInTheDocument();
     });
   });
+
+  it("initiates verification call and transitions phone simulator to ringing when transaction decision is HOLD_FOR_INVESTIGATION", async () => {
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/health/ready")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: "ready", database: "connected" }),
+        };
+      }
+      if (url.includes("/api/v1/risk/evaluate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            risk_score: 95,
+            risk_level: "CRITICAL",
+            recommended_action: "HOLD_FOR_INVESTIGATION",
+            explanation: "Critical fraud risk detected.",
+            triggered_rules: [],
+            supporting_evidence: [],
+            missing_evidence: [],
+          }),
+        };
+      }
+      if (url.endsWith("/api/v1/transactions")) {
+        return {
+          ok: true,
+          status: 201,
+          json: async () => ({ id: "00000000-0000-0000-0000-000000000001" }),
+        };
+      }
+      if (url.includes("/workflow/evaluate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            action: "HOLD_FOR_INVESTIGATION",
+            to_state: "HELD_FOR_VERIFICATION",
+            requires_verification: false,
+          }),
+        };
+      }
+      if (url.includes("/calls")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "00000000-0000-0000-0000-000000000002",
+            status: "RINGING",
+            turns: [
+              {
+                id: "00000000-0000-0000-0000-000000000003",
+                role: "assistant",
+                content: "Hello, this is Aster Bank Fraud Prevention.",
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+
+    render(<App />);
+
+    const sendBtn = screen.getByTestId("phone-send-money");
+    fireEvent.click(sendBtn);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("button-answer-call")).toBeInTheDocument();
+      expect(screen.getByTestId("button-decline-call")).toBeInTheDocument();
+      expect(screen.getByTestId("button-answer-in-chat")).toBeInTheDocument();
+    });
+  });
 });
+

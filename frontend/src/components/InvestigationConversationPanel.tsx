@@ -60,6 +60,7 @@ export function InvestigationConversationPanel({
 
   // Load active or existing conversation for this transaction
   const loadConversation = useCallback(async () => {
+    if (!transactionId || transactionId.startsWith('AST-')) return;
     try {
       setLoading(true);
       setError(null);

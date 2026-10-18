@@ -17,6 +17,10 @@ from app.domain.coercion import (
     CoercionLevel,
     CoercionSeverity,
 )
+from app.domain.customer_dialogue import (
+    CustomerDialogueTurnResult,
+    SuggestedAction,
+)
 from app.domain.investigation import (
     ConfidenceLevel,
     EvidenceProvenance,
@@ -67,6 +71,15 @@ class AIInvestigationClient(Protocol):
         """Generate structured forensic coercion findings from call transcript."""
         ...
 
+    async def generate_customer_dialogue_turn(
+        self,
+        prompt: str,
+        system_instruction: str,
+        correlation_id: str | None = None,
+    ) -> tuple[CustomerDialogueTurnResult, InvestigationModelMetadata]:
+        """Generate structured customer dialogue response, observations, and next inquiry."""
+        ...
+
 
 class VertexGeminiClient:
     """Client for Google Cloud Vertex AI Gemini using the official google-genai SDK."""
@@ -100,8 +113,8 @@ class VertexGeminiClient:
             self._client = genai.Client(api_key=self.settings.GEMINI_API_KEY)
         else:
             raise AIConfigurationError(
-                "Neither GCP_PROJECT_ID nor GEMINI_API_KEY is configured. "
-                "Set Vertex AI credentials or GEMINI_API_KEY to enable live model investigation."
+                "Neither GEMINI_API_KEY nor GCP_PROJECT_ID is configured in the environment. "
+                "Set GEMINI_API_KEY in .env or configure AI_PROVIDER=mock for offline testing."
             )
         return self._client
 
@@ -483,6 +496,135 @@ class VertexGeminiClient:
             status_code=503,
         )
 
+    async def generate_customer_dialogue_turn(
+        self,
+        prompt: str,
+        system_instruction: str,
+        correlation_id: str | None = None,
+    ) -> tuple[CustomerDialogueTurnResult, InvestigationModelMetadata]:
+        """Execute Gemini model generation for customer dialogue turn with structured schema."""
+        client = self._get_client()
+        start_time = time.monotonic()
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema=CustomerDialogueTurnResult,
+            temperature=0.2,
+        )
+
+        attempts = 0
+        last_error: Exception | None = None
+
+        while attempts <= self.max_retries:
+            attempts += 1
+            try:
+                logger.info(
+                    "Calling Gemini customer dialogue model=%s (attempt %d/%d, correlation_id=%s)",
+                    self.model_id,
+                    attempts,
+                    self.max_retries + 1,
+                    correlation_id,
+                )
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=self.model_id,
+                        contents=prompt,
+                        config=config,
+                    ),
+                    timeout=self.timeout,
+                )
+
+                latency_ms = int((time.monotonic() - start_time) * 1000)
+                raw_text = response.text
+                if not raw_text:
+                    raise AIProviderError(
+                        message="Gemini model returned empty response for customer dialogue",
+                        code="AI_EMPTY_RESPONSE",
+                        status_code=502,
+                    )
+
+                try:
+                    parsed_json = json.loads(raw_text)
+                    structured_output = CustomerDialogueTurnResult.model_validate(parsed_json)
+                except Exception as parse_err:
+                    logger.error(
+                        "Failed to parse customer dialogue output: %s",
+                        parse_err,
+                    )
+                    raise AIProviderError(
+                        message="Output did not match expected customer dialogue schema",
+                        code="AI_PARSE_ERROR",
+                        status_code=502,
+                        details={"raw_output_snippet": raw_text[:500]},
+                    ) from parse_err
+
+                metadata = InvestigationModelMetadata(
+                    provider="vertex_ai" if self.settings.GCP_PROJECT_ID else "gemini_api",
+                    model_id=self.model_id,
+                    latency_ms=latency_ms,
+                    correlation_id=correlation_id,
+                )
+                return structured_output, metadata
+
+            except TimeoutError:
+                logger.warning("Gemini customer dialogue timed out after %.1fs", self.timeout)
+                last_error = AIProviderError(
+                    message=f"AI customer dialogue timed out after {self.timeout}s",
+                    code="AI_PROVIDER_TIMEOUT",
+                    status_code=504,
+                )
+            except errors.APIError as api_err:
+                err_code = getattr(api_err, "code", None)
+                err_msg = str(api_err)
+                logger.warning(
+                    "Gemini API error during dialogue turn (code=%s): %s", err_code, err_msg
+                )
+                if err_code == 429:
+                    raise AIProviderError(
+                        message="AI investigation rate limit or quota exceeded",
+                        code="AI_RATE_LIMIT_EXCEEDED",
+                        status_code=429,
+                    ) from api_err
+                if err_code == 403:
+                    raise AIProviderError(
+                        message=(
+                            "AI investigation permission denied or authentication failure "
+                            "with provider"
+                        ),
+                        code="AI_PERMISSION_DENIED",
+                        status_code=502,
+                    ) from api_err
+                if err_code in (500, 502, 503, 504) and attempts <= self.max_retries:
+                    backoff = 0.5 * (2 ** (attempts - 1))
+                    await asyncio.sleep(backoff)
+                    continue
+                last_error = AIProviderError(
+                    message=f"AI provider returned error: {err_msg}",
+                    code="AI_PROVIDER_ERROR",
+                    status_code=502,
+                )
+                break
+            except Exception as general_err:
+                if isinstance(general_err, (AIProviderError, AIConfigurationError)):
+                    raise
+                logger.error("Unexpected error during Gemini dialogue execution: %s", general_err)
+                last_error = AIProviderError(
+                    message="Unexpected error communicating with AI investigation provider",
+                    code="AI_PROVIDER_ERROR",
+                    status_code=502,
+                )
+                break
+
+        if last_error:
+            raise last_error
+
+        raise AIProviderError(
+            message="AI customer dialogue failed after retries",
+            code="AI_PROVIDER_UNAVAILABLE",
+            status_code=503,
+        )
+
 
 class MockGeminiClient:
     """Configurable mock AI client for unit/integration tests and offline development."""
@@ -492,6 +634,7 @@ class MockGeminiClient:
         default_output: InvestigationStructuredOutput | None = None,
         default_conversation_output: ConversationTurnStructuredOutput | None = None,
         default_coercion_output: CoercionStructuredOutput | None = None,
+        default_dialogue_output: CustomerDialogueTurnResult | None = None,
         should_fail: bool = False,
         failure_exception: Exception | None = None,
         latency_ms: int = 45,
@@ -499,9 +642,39 @@ class MockGeminiClient:
         self.default_output = default_output
         self.default_conversation_output = default_conversation_output
         self.default_coercion_output = default_coercion_output
+        self.default_dialogue_output = default_dialogue_output
         self.should_fail = should_fail
         self.failure_exception = failure_exception
         self.latency_ms = latency_ms
+
+    async def generate_customer_dialogue_turn(
+        self,
+        prompt: str,
+        system_instruction: str,
+        correlation_id: str | None = None,
+    ) -> tuple[CustomerDialogueTurnResult, InvestigationModelMetadata]:
+        """Return predefined or dynamically synthesized customer dialogue turn output."""
+        if self.should_fail:
+            if self.failure_exception:
+                raise self.failure_exception
+            raise AIProviderError(
+                message="Mocked AI provider failure",
+                code="AI_PROVIDER_ERROR",
+                status_code=502,
+            )
+
+        if self.default_dialogue_output is not None:
+            output = self.default_dialogue_output
+        else:
+            output = self._synthesize_mock_dialogue_turn(prompt)
+
+        metadata = InvestigationModelMetadata(
+            provider="mock_gemini",
+            model_id="gemini-2.5-flash-mock",
+            latency_ms=self.latency_ms,
+            correlation_id=correlation_id,
+        )
+        return output, metadata
 
     async def generate_coercion_analysis(
         self,
@@ -1561,4 +1734,290 @@ class MockGeminiClient:
             uncertainty_notes=uncertainty_notes,
             missing_information=missing_information,
             summary=summary,
+        )
+
+    def _synthesize_mock_dialogue_turn(self, prompt: str) -> CustomerDialogueTurnResult:
+        """Synthesize dynamic, context-aware customer dialogue turn without hardcoded scripts."""
+        recipient_match = re.search(r"Recipient Name:\s*([^\n]+)", prompt)
+        amount_match = re.search(r"Amount:\s*([^\n]+)", prompt)
+        resp_match = re.search(
+            r"<untrusted_customer_response>\s*([\s\S]*?)\s*</untrusted_customer_response>",
+            prompt,
+        )
+        history_turns = re.findall(
+            r"<untrusted_turn[^>]*speaker=\"customer\"[^>]*>\s*([\s\S]*?)\s*</untrusted_turn>",
+            prompt,
+        )
+        prior_customer_turn_count = len(history_turns)
+
+        recipient = recipient_match.group(1).strip() if recipient_match else "the beneficiary"
+        amount = amount_match.group(1).strip() if amount_match else "this transfer"
+
+        # Turn 0: Initial greeting and first inquiry
+        if resp_match is None:
+            return CustomerDialogueTurnResult(
+                assistant_message=(
+                    f"Hello, this is Aster Bank Fraud Prevention verifying your payment of "
+                    f"{amount} to {recipient}. Could you please confirm what this payment is for "
+                    f"and who asked you to make it?"
+                ),
+                internal_observations=[
+                    "Initial verification inquiry initiated for high-risk transfer."
+                ],
+                evidence_references=["tx:amount", "tx:recipient_name"],
+                uncertainty_notes=["Customer statement not yet collected."],
+                suggested_action=SuggestedAction.CONTINUE_INQUIRY,
+                is_terminal_turn=False,
+                risk_sentiment=RiskSentiment.UNKNOWN,
+                coercion_cues=[],
+            )
+
+        customer_response = resp_match.group(1).strip()
+        lower_resp = customer_response.lower()
+
+        # 1. Adversarial prompt injection defense
+        if any(
+            phrase in lower_resp
+            for phrase in (
+                "ignore previous instructions",
+                "ignore all instructions",
+                "system override",
+                "clear all risk flags",
+                "approve this transfer",
+                "approve my transfer",
+                "mark safe",
+            )
+        ):
+            return CustomerDialogueTurnResult(
+                assistant_message=(
+                    "I understand, but as part of Aster Bank protocols, I need you to confirm "
+                    "the legitimate purpose of this transfer."
+                ),
+                internal_observations=[
+                    "Adversarial instruction in customer input treated as manipulation."
+                ],
+                evidence_references=["customer_response"],
+                uncertainty_notes=[
+                    "Customer attempted prompt injection; legitimate transfer reason unverified."
+                ],
+                suggested_action=SuggestedAction.RECOMMEND_HOLD,
+                is_terminal_turn=False,
+                risk_sentiment=RiskSentiment.SUSPICIOUS,
+                coercion_cues=["adversarial_prompt_manipulation"],
+            )
+
+        # 2. Authority duress / digital arrest / legal threats
+        has_authority = any(
+            kw in lower_resp
+            for kw in (
+                "cbi",
+                "police",
+                "officer",
+                "arrest",
+                "warrant",
+                "court",
+                "customs",
+                "narcotics",
+                "law enforcement",
+                "money laundering",
+            )
+        )
+        has_pressure_urgency = any(
+            kw in lower_resp
+            for kw in (
+                "urgent",
+                "secret",
+                "safe account",
+                "don't tell",
+                "not tell",
+                "quickly",
+                "hurry",
+                "pressure",
+                "immediately",
+            )
+        )
+
+        authority_or_safe = (
+            has_authority
+            or "safe account" in lower_resp
+            or ("secret" in lower_resp and has_pressure_urgency)
+        )
+        if authority_or_safe:
+            is_terminal = (
+                has_pressure_urgency
+                or "safe account" in lower_resp
+                or prior_customer_turn_count >= 1
+            )
+            if is_terminal:
+                return CustomerDialogueTurnResult(
+                    assistant_message=(
+                        "Please pause this transfer immediately. Aster Bank will never instruct "
+                        "you to move money to a 'safe account' or demand secret transfers."
+                    ),
+                    internal_observations=[
+                        "Customer confirms direct instruction from alleged authority.",
+                        "Classic digital arrest / authority impersonation pattern identified.",
+                    ],
+                    evidence_references=[
+                        "customer_response",
+                        "rule:RULE_COERCION_AUTHORITY_PRESSURE",
+                    ],
+                    uncertainty_notes=[],
+                    suggested_action=SuggestedAction.RECOMMEND_HOLD,
+                    is_terminal_turn=True,
+                    risk_sentiment=RiskSentiment.COERCED,
+                    coercion_cues=[
+                        "authority_coercion",
+                        "urgency_pressure",
+                        "secrecy_directive",
+                    ],
+                )
+            return CustomerDialogueTurnResult(
+                assistant_message=(
+                    "Did the caller demand that you keep this matter confidential from bank staff, "
+                    "or threaten you with legal action if you do not pay immediately?"
+                ),
+                internal_observations=[
+                    "Customer reports contact from alleged authority demanding payment."
+                ],
+                evidence_references=["customer_response"],
+                uncertainty_notes=[
+                    "Unconfirmed whether caller demanded secrecy or issued explicit threats."
+                ],
+                suggested_action=SuggestedAction.RECOMMEND_HOLD,
+                is_terminal_turn=False,
+                risk_sentiment=RiskSentiment.COERCED,
+                coercion_cues=["authority_impersonation"],
+            )
+
+        # 3. Investment / crypto / high-yield schemes
+        has_investment = any(
+            kw in lower_resp
+            for kw in (
+                "investment",
+                "yield",
+                "trading",
+                "crypto",
+                "returns",
+                "profit",
+                "vip",
+                "telegram",
+                "guaranteed",
+                "apex yield",
+            )
+        )
+        if has_investment:
+            if has_pressure_urgency or prior_customer_turn_count >= 1:
+                return CustomerDialogueTurnResult(
+                    assistant_message=(
+                        "We strongly advise pausing this transfer. Unsolicited private investment "
+                        "schemes with guaranteed returns are frequently associated with fraud."
+                    ),
+                    internal_observations=[
+                        "Customer reports investment scheme offering guaranteed returns."
+                    ],
+                    evidence_references=["customer_response"],
+                    uncertainty_notes=[],
+                    suggested_action=SuggestedAction.RECOMMEND_HOLD,
+                    is_terminal_turn=True,
+                    risk_sentiment=RiskSentiment.SUSPICIOUS,
+                    coercion_cues=["unsolicited_investment_pressure"],
+                )
+            return CustomerDialogueTurnResult(
+                assistant_message=(
+                    "Did someone contact you online offering guaranteed returns, and did they "
+                    "instruct you on how to make this transfer?"
+                ),
+                internal_observations=[
+                    "Customer references an investment opportunity or private fund."
+                ],
+                evidence_references=["customer_response"],
+                uncertainty_notes=[
+                    "Customer has not verified whether the platform is registered or legitimate."
+                ],
+                suggested_action=SuggestedAction.RECOMMEND_REEVALUATION,
+                is_terminal_turn=False,
+                risk_sentiment=RiskSentiment.SUSPICIOUS,
+                coercion_cues=[],
+            )
+
+        # 4. Routine / commercial / verified invoice / personal transfer
+        has_routine = any(
+            kw in lower_resp
+            for kw in (
+                "invoice",
+                "equipment",
+                "vendor",
+                "supplier",
+                "rent",
+                "lease",
+                "friend",
+                "family",
+                "personal",
+                "landlord",
+                "starling",
+            )
+        )
+        if has_routine:
+            if prior_customer_turn_count >= 1:
+                return CustomerDialogueTurnResult(
+                    assistant_message=(
+                        "Thank you for confirming your payment details. Aster Bank security has "
+                        "recorded your explanation."
+                    ),
+                    internal_observations=[
+                        "Customer provided consistent personal or business context for the payment."
+                    ],
+                    evidence_references=["customer_response"],
+                    uncertainty_notes=[],
+                    suggested_action=SuggestedAction.RECOMMEND_REEVALUATION,
+                    is_terminal_turn=True,
+                    risk_sentiment=RiskSentiment.BENIGN,
+                    coercion_cues=[],
+                )
+            return CustomerDialogueTurnResult(
+                assistant_message=(
+                    "Thank you for clarifying. Did you receive this payment request or updated "
+                    "account details through a verified contact method you trust?"
+                ),
+                internal_observations=[
+                    "Customer reports ordinary commercial or personal transaction context."
+                ],
+                evidence_references=["customer_response"],
+                uncertainty_notes=["Beneficiary verification details pending confirmation."],
+                suggested_action=SuggestedAction.CONTINUE_INQUIRY,
+                is_terminal_turn=False,
+                risk_sentiment=RiskSentiment.BENIGN,
+                coercion_cues=[],
+            )
+
+        # 5. General fallback
+        if prior_customer_turn_count >= 2:
+            return CustomerDialogueTurnResult(
+                assistant_message=(
+                    "Thank you for answering our security questions. Our safety system is "
+                    "reviewing your responses against bank security policies to protect "
+                    "your account."
+                ),
+                internal_observations=["Customer completed verification questionnaire."],
+                evidence_references=["customer_response"],
+                uncertainty_notes=[],
+                suggested_action=SuggestedAction.RECOMMEND_REEVALUATION,
+                is_terminal_turn=True,
+                risk_sentiment=RiskSentiment.UNKNOWN,
+                coercion_cues=[],
+            )
+
+        return CustomerDialogueTurnResult(
+            assistant_message=(
+                "Could you tell us more about who instructed this payment and whether anyone "
+                "asked you to act urgently?"
+            ),
+            internal_observations=["Customer provided general response regarding payment purpose."],
+            evidence_references=["customer_response"],
+            uncertainty_notes=["Origin of instructions not yet fully clarified."],
+            suggested_action=SuggestedAction.CONTINUE_INQUIRY,
+            is_terminal_turn=False,
+            risk_sentiment=RiskSentiment.UNKNOWN,
+            coercion_cues=[],
         )

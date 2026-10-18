@@ -13,6 +13,7 @@ from app.domain.risk_engine import (
     evaluate_risk,
 )
 from app.domain.state_machine import ActorType, TransactionState
+from app.repositories.recipient_repository import RecipientRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.transaction import TransitionTransactionRequest
 from app.services.transaction_service import TransactionService
@@ -27,9 +28,13 @@ class RiskService:
         self,
         repository: TransactionRepository,
         transaction_service: TransactionService,
+        recipient_repository: RecipientRepository | None = None,
     ) -> None:
         self.repository = repository
         self.transaction_service = transaction_service
+        self.recipient_repository = recipient_repository or (
+            RecipientRepository(repository.session) if hasattr(repository, "session") else None
+        )
 
     def evaluate_pure(self, evidence: TransactionEvidence) -> RiskAssessmentResult:
         """Execute pure deterministic feature evaluation without side-effects or persistence."""
@@ -63,6 +68,11 @@ class RiskService:
                 ),
             )
 
+        # Resolve recipient against authoritative database-backed registry if identifier present
+        rec_record = None
+        if self.recipient_repository is not None and tx.recipient_identifier:
+            rec_record = await self.recipient_repository.get_by_upi_id(tx.recipient_identifier)
+
         # Merge transaction parameters into evidence
         if evidence is None:
             eval_evidence = TransactionEvidence(
@@ -84,6 +94,20 @@ class RiskService:
                 recipient_identifier=evidence.recipient_identifier or tx.recipient_identifier,
                 purpose=evidence.purpose or tx.purpose,
                 customer_id=evidence.customer_id or tx.customer_id,
+            )
+
+        if rec_record is not None:
+            # Authoritative server-controlled signals take precedence over untrusted
+            # client parameters
+            is_first_time = not rec_record.is_trusted_beneficiary
+            eval_evidence = replace(
+                eval_evidence,
+                is_trusted_beneficiary=rec_record.is_trusted_beneficiary,
+                is_flagged_mule=rec_record.is_flagged_mule,
+                recipient_account_age_days=rec_record.account_age_days,
+                fan_in_count_24h=rec_record.fan_in_count_24h,
+                fan_out_count_24h=rec_record.fan_out_count_24h,
+                is_first_time_recipient=is_first_time,
             )
 
         # Execute deterministic risk engine evaluation
@@ -119,7 +143,21 @@ class RiskService:
                 ),
             )
 
-        # Persist assessment record atomically
+        # Persist assessment record atomically with enriched input snapshot
+        snapshot = dict(result.input_snapshot)
+        if rec_record is not None:
+            snapshot["recipient_registry_hit"] = True
+            snapshot["recipient_registry_id"] = str(rec_record.id)
+            snapshot["recipient_category"] = (
+                rec_record.category.value
+                if hasattr(rec_record.category, "value")
+                else str(rec_record.category)
+            )
+            snapshot["recipient_bank"] = rec_record.bank_name
+            snapshot["recipient_branch"] = rec_record.branch_region
+        else:
+            snapshot["recipient_registry_hit"] = False
+
         assessment_model = TransactionAssessmentModel(
             id=uuid.uuid4(),
             transaction_id=tx.id,
@@ -140,7 +178,7 @@ class RiskService:
             ],
             supporting_evidence=result.supporting_evidence,
             missing_evidence=result.missing_evidence,
-            input_snapshot=result.input_snapshot,
+            input_snapshot=snapshot,
         )
         saved_assessment = await self.repository.create_assessment(assessment_model)
 

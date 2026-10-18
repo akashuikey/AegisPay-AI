@@ -95,7 +95,7 @@ export function CustomerInterventionPanel({
   const isMounted = useRef(true);
 
   const loadLatest = useCallback(async () => {
-    if (!transactionId) return;
+    if (!transactionId || transactionId.startsWith('AST-')) return;
     setLoading(true);
     setError(null);
     try {
@@ -123,7 +123,7 @@ export function CustomerInterventionPanel({
   }, [loadLatest]);
 
   const handleExecute = useCallback(async () => {
-    if (!transactionId || executing) return;
+    if (!transactionId || transactionId.startsWith('AST-') || executing) return;
     setExecuting(true);
     setError(null);
     try {

@@ -219,6 +219,22 @@ class AuthenticationError(AppException):
         )
 
 
+class AuthorizationError(AppException):
+    """Raised when an authenticated principal is not permitted to access a resource."""
+
+    def __init__(
+        self,
+        message: str = "You are not authorized to access this resource",
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(
+            message=message,
+            code="FORBIDDEN",
+            status_code=status.HTTP_403_FORBIDDEN,
+            details=details,
+        )
+
+
 class RateLimitError(AppException):
     """Raised when a client exceeds a bounded request rate (HTTP 429)."""
 

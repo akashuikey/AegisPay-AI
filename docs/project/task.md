@@ -816,6 +816,178 @@
 
 ---
 
+#### Task P2-OptA: Dynamic Gemini-Powered Simulated Voice and Chat Dialogue
+- **Owner / Agent**: Senior Architect / Full-Stack Engineer (Option A)
+- **Status**: `DONE`
+- **Objective**: Replace the static, scripted customer-call interactions (`initialQuestions` array and hardcoded regex branches in `App.tsx`) with a dynamic, evidence-driven, multi-turn AI investigation powered by Gemini (`generate_customer_dialogue_turn`). Grounded in transaction facts and evidence, linked to deterministic risk policy, customer verification, and automated resolution. See [ADR-008](../decisions/ADR-008-dynamic-simulated-voice-and-chat.md).
+- **Deliverables**:
+  1. `backend/app/domain/customer_dialogue.py`: domain entities (`DialogueChannel`, `CallSessionStatus`, `CallSessionDirection`, `CustomerDialogueTurnResult`), anti-prompt-injection prompts (`CUSTOMER_DIALOGUE_SYSTEM_INSTRUCTION`, `build_customer_dialogue_prompt` with `<untrusted_customer_response>` and `<untrusted_dialogue_history>`).
+  2. `backend/app/domain/investigation.py`: added `CUSTOMER = "customer"` to `ConversationRole`.
+  3. `backend/app/services/ai_client.py`: added `generate_customer_dialogue_turn` to `AIInvestigationClient` protocol, implemented in `VertexGeminiClient` and `MockGeminiClient` (supporting dynamic topic inquiry for authority coercion, high-yield investment scams, supplier invoices, prompt-injection defense, and terminal hold recommendations).
+  4. `backend/app/db/models.py` & Alembic migration `0013_create_customer_call_sessions.py`: `transaction_call_sessions` table with optimistic locking and `conversation_type` on `investigation_conversations`.
+  5. `backend/app/repositories/transaction_repository.py`: call session repository methods with eager relationship loading (`selectinload`) and scalar caching before commit to prevent SQLAlchemy `MissingGreenlet` errors.
+  6. `backend/app/services/customer_dialogue_service.py`: orchestrates call session lifecycle (`initiate`, `connect`, `submit_turn`, `complete`, `decline`), bounds turns, and automatically invokes `CoercionService.analyze_transaction_coercion` on session completion.
+  7. `backend/app/api/customer_dialogue.py`: REST routes mounted under `/api/v1/transactions/{id}/calls` and `/api/v1/calls/{id}/*` authenticated via operator JWT or customer verification token.
+  8. `frontend/src/api/customerDialogueApi.ts`: typed API client bindings for call sessions.
+  9. `frontend/src/App.tsx`: wired backend transaction creation, call session initiation, dynamic speech/chat turns with Web Speech API and text fallback, intelligent scenario-aware demo responses, and drawer panel transaction ID synchronization.
+  10. Tests:
+      - Backend: `tests/unit/test_customer_dialogue_domain.py` (6 tests), `tests/integration/test_customer_dialogue_api.py` (11 tests). Total 310 backend tests passing.
+      - Frontend: `frontend/src/__tests__/CustomerDialogue.test.tsx` (6 tests). Total 57 frontend tests passing.
+- **Acceptance Criteria**:
+  - [x] Replaced static scripted 3-question sequence with dynamic Gemini-powered multi-turn dialogue.
+  - [x] Deterministic risk policy remains authoritative; Gemini turns provide structured forensic observations and conversational questions.
+  - [x] Prompt injection defense enforced (`<untrusted_customer_response>`).
+  - [x] Voice stress remains purely advisory (`VOICE_STRESS_ALONE_NON_DISQUALIFYING`).
+  - [x] Call sessions persist in database with optimistic locking and linked conversation turns.
+  - [x] Coercion analysis automatically triggers upon call session completion.
+  - [x] Authenticated routes support both operator JWT and customer verification tokens.
+  - [x] Web Speech recognition and audio synthesis with text chat fallback work seamlessly in mobile phone simulator.
+  - [x] All 310 backend tests and 57 frontend tests pass (100% green).
+- **Verification Commands & Results**:
+  ```bash
+  # Backend
+  POSTGRES_PORT=5433 uv run pytest              # 310 passed in 34.39s
+  uv run ruff check .                           # All checks passed!
+  uv run ruff format --check .                  # 102 files already formatted
+  uv run mypy app                               # Success: no issues found in 75 source files
+  # Frontend
+  npm run test                                  # 57 passed (10 test files)
+  npm run build                                 # built successfully
+  ```
+
+---
+
+#### Task P2-A10: Customer Dialogue Reliability Audit & Fixes
+- **Owner / Agent**: Reliability Audit (Option A hardening)
+- **Status**: `DONE`
+- **Objective**: Audit the staged P2-OptA customer-dialogue implementation for correctness, concurrency, lifecycle, security, and integration defects before commit, and fix confirmed issues with regression tests.
+- **Confirmed defects fixed**:
+  1. **Lifecycle (A1)** — `complete_call_session` overwrote terminal states (`DECLINED`/`TIMED_OUT`/`FAILED`/`CANCELLED` → `COMPLETED`), corrupting the audit trail. Now rejects non-`COMPLETED` terminal states with `ConflictError`; idempotent on `COMPLETED`.
+  2. **Lifecycle (A2)** — a failed initial Gemini generation left a persisted active (`RINGING`) session with no turns, which the active-session guard then kept returning. Initiation now persists the session first, and on AI failure marks it `FAILED` (terminal) and closes the conversation, so retries start fresh.
+  3. **Concurrency (B1)** — no DB constraint enforced "one active session per transaction"; the read-before-write guard alone could not stop concurrent duplicates. Added partial unique index `uq_call_sessions_active_tx` (model + migration `0013`); initiation resolves the `IntegrityError` by returning the winning session.
+  4. **Concurrency (B2)** — a racing turn at a taken `(conversation_id, turn_index)` surfaced as an unhandled 500. `create_conversation_turn`/`create_call_session` now roll back and re-raise on `IntegrityError`; `submit_turn` maps it to a 409 `ConflictError`.
+  5. **Coercion policy (C1)** — automatic completion triggered coercion analysis from only the final assistant turn. It now evaluates accumulated evidence across all turns.
+  6. **Coercion policy (C2)** — manual `complete` did not run coercion analysis (inconsistent with automatic completion). A shared `_maybe_link_coercion_analysis` helper now runs on both paths; AI/coercion failures remain logged-and-swallowed and never corrupt the lifecycle or transaction state.
+  7. **Security (D1)** — internal forensic fields (internal observations, uncertainty notes, suggested action, coercion cues, risk sentiment, evidence references) were returned to customer sessions. `_to_call_session_response` now redacts them for non-operators.
+  8. **Security (D2)** — customer verification tokens (bound to one transaction) could access any transaction's call session (IDOR). `authorize_call_access` now returns the bound `transaction_id` and every route enforces the customer scope; added `AuthorizationError` (HTTP 403).
+  9. **Frontend (F1)** — turn submissions were not idempotent and had no in-flight guard. `App.tsx` now sends a per-answer `client_turn_id` and blocks re-entrant submissions.
+- **Regression tests added** (8 backend in `tests/integration/test_customer_dialogue_api.py`, 1 frontend in `CustomerDialogue.test.tsx`): terminal-state completion rejection, AI-failure-then-retry, active-session unique constraint, duplicate-turn 409, coercion-before-final-turn + manual completion, idempotent turn replay, cross-transaction authorization (403), customer field redaction, and idempotent `client_turn_id`.
+- **Not changed (verified already safe)**: `(conversation_id, turn_index)` uniqueness already existed; coercion grounding/voice-stress-advisory invariants and deterministic policy authority already upheld.
+- **Known limitations**: `TIMED_OUT` remains a reserved status with no server-side timeout sweeper (the dialogue is bounded by `MAX_DIALOGUE_TURNS` and client-driven decline/complete). True concurrent-load behavior was not stress-tested; `IntegrityError` paths are covered by DB-constraint tests, not live races.
+- **Verification Commands & Results**:
+  ```bash
+  POSTGRES_PORT=5433 uv run pytest              # 318 passed in ~35s
+  uv run ruff check .                           # All checks passed!
+  uv run ruff format --check .                  # 109 files already formatted
+  uv run mypy app                               # Success: no issues found in 76 source files
+  POSTGRES_PORT=5433 make db-verify-migrations  # upgrade/downgrade/re-upgrade OK (incl. 0013 partial index)
+  npm run lint / typecheck / test / build       # 58 frontend tests passed; build OK
+  POSTGRES_PORT=5433 make check-all             # full gate green
+  ```
+
+---
+
+#### Task P2-A11: Real-Time Gemini Live Voice Agent & Streaming Fraud Intelligence
+- **Owner / Agent**: Full-Stack Engineer (real-time voice)
+- **Status**: `DONE` (provider integration verified with mocks only — see limitations)
+- **Objective**: Upgrade the simulated voice path to true real-time bidirectional audio via the
+  Gemini Live API, streaming audio both ways over an authenticated WebSocket, persisting the
+  transcript incrementally, and running evidence analysis in parallel while the call is live.
+  Deterministic fraud policy remains the sole authority for transaction-state changes.
+- **Deliverables**:
+  1. `backend/app/core/config.py`: `GEMINI_LIVE_*` settings (flag, model, voice, bounded session
+     seconds, sample rates, frame/queue caps, concurrency cap, analysis cadence) + a validator that
+     fails clearly if Live is enabled without credentials.
+  2. `backend/app/domain/live_voice.py`: transcript speaker/kind enums, `LiveAnalysisStatus`, the
+     versioned `LiveEvidenceSnapshot`/`LiveEvidenceFinding` contract (`live-analysis-v1`), and the
+     natural conversational agent system instruction (dynamic, non-accusatory, no scripts, no raw
+     scores, voice-stress-not-proof).
+  3. `backend/app/services/live_voice_client.py`: provider-agnostic `LiveVoiceClient`/`LiveVoiceSession`
+     interface, a real `GeminiLiveVoiceClient` over `google-genai` 2.31.0 (`aio.live.connect`, audio
+     in/out transcription, speech voice, session resumption, context-window compression), and a
+     deterministic `MockLiveVoiceClient` for tests/offline.
+  4. `backend/app/services/live_voice_analysis.py`: grounded incremental `LiveEvidenceAnalyzer`
+     producing the versioned snapshot with transcript-span references (offline-deterministic; a
+     Gemini text strategy can be swapped in).
+  5. `backend/app/services/live_voice_service.py`: `LiveVoiceOrchestrator` — bounded queues, independent
+     ingest/egress/persistence/analysis/watchdog tasks, single-writer monotonic `seq`, dedup, barge-in,
+     resumption handle capture, deterministic cancellation/cleanup, and finalize (flush + final analysis).
+  6. `backend/app/db/models.py` + migration `0014_live_voice_transcripts.py`: `call_transcript_segments`
+     (unique `(call_session_id, seq)`) and `call_live_analyses` (versioned snapshots) tables.
+  7. `backend/app/repositories/transaction_repository.py`: transcript/analysis persistence + queries.
+  8. `backend/app/api/live_voice.py`: authenticated `WS /api/v1/calls/{id}/live` (operator JWT or
+     customer token, transaction-scoped), lifecycle/state validation, one-session-per-call +
+     concurrency cap, Live-disabled gate; REST `GET /calls/{id}/transcript` (scoped) and
+     `GET /calls/{id}/live-analysis` (operator-only) added in `api/customer_dialogue.py`.
+  9. `frontend/src/api/liveVoiceClient.ts` + `frontend/public/audio/pcm-capture-worklet.js`: capability
+     detection, mic capture → 16 kHz PCM16 resample, WS lifecycle, incremental 24 kHz playback,
+     barge-in flush, reconnect/close handling, cleanup, and explicit (non-silent) text fallback.
+  10. `frontend/src/App.tsx`: voice path attempts Live when supported + a call session exists, surfaces
+      live status/transcript/analysis in an operator panel clearly labeled simulated, and falls back
+      explicitly to the existing voice/chat path when Live is unavailable. Browsers without audio
+      capture (incl. jsdom tests) never attempt Live, preserving all prior behavior.
+- **Security guarantees**: Gemini key stays server-side (never in browser); WS authenticated and
+  transaction-scoped (customer tokens cannot reach another transaction's stream); audio frame size,
+  queue depth, session duration, and concurrent-session caps enforced; internal analysis is
+  operator-only; no secrets/raw audio/full transcripts logged by default.
+- **Policy authority**: the transcript/analysis workers never change transaction or call state; only
+  the existing deterministic policy/state machine does. Analysis is advisory and isolated — its
+  failure degrades to "unavailable" without interrupting voice.
+- **Tests** (23 new backend, 1 skipped smoke; 7 new frontend): config validation; grounded analyzer
+  (categories, mitigating, escalation rules, no-assistant-mining); orchestrator audio forwarding,
+  interim-vs-final persistence + dedup + ordered seq, parallel analysis, analysis-failure isolation,
+  termination/cleanup, seq resumption without duplicates; WS auth/disabled/unknown-call/cross-transaction/
+  terminal-call/single-session-conflict + full streaming persistence; frontend PCM encode, support
+  detection, lifecycle/events/barge-in, mic-denied fallback, policy-code close, graceful end + teardown.
+- **Verification Commands & Results**:
+  ```bash
+  POSTGRES_PORT=5433 uv run pytest              # 341 passed, 1 skipped (live smoke) in ~44s
+  uv run ruff check . && uv run ruff format --check .   # clean; 120 files formatted
+  uv run mypy app                               # Success: no issues found in 82 source files
+  POSTGRES_PORT=5433 make db-verify-migrations  # 0014 upgrade/downgrade/re-upgrade OK
+  npm run lint && npm run typecheck && npm run test && npm run build  # 65 passed; build OK
+  POSTGRES_PORT=5433 make check-all             # full gate green
+  ```
+- **Known limitations / risks**: the real Gemini Live path is verified with the mock provider only —
+  no live Gemini call was made (no reachable provider in this environment; the previously pasted API
+  key is treated as compromised and must be revoked/replaced). Run `GEMINI_LIVE_SMOKE=1` with valid
+  credentials to exercise the real handshake (`tests/integration/test_live_voice_smoke.py`). The WS
+  concurrency/single-session registry is process-local (fine for a single-instance prototype, not a
+  multi-worker deployment). Concurrency correctness is covered by targeted tests, not live load. The
+  frontend live audio UI could not be exercised in jsdom; its engine is unit-tested with mocked
+  WebSocket/AudioContext/getUserMedia.
+
+---
+
+#### Task P2-A12: Transaction Intelligence, Selective Bank Calls & Gemini Live Configuration Fix
+- **Owner / Agent**: Senior Staff Engineer / Full-Stack Architect
+- **Status**: `DONE`
+- **Objective**: Fix Gemini configuration path, decouple call creation from text-model availability, build a persistent 20-recipient fictional registry, resolve server-controlled recipient risk evidence in `RiskService`, and connect automated risk evaluation to selective bank calls while preventing customer-scoped token initiation.
+- **Dependencies**: Tasks P2-A10, P2-A11.
+- **Deliverables & Implementation**:
+  1. `backend/app/core/config.py`: Explicit repository root and backend directory paths added to `_ENV_FILES`. API key sanitization in `assemble_gemini_api_key` strips surrounding quotes/whitespace and checks `GOOGLE_API_KEY` and `AI_STUDIO_API_KEY` aliases. Missing credentials surface clean errors without leaking secret material.
+  2. `backend/app/api/investigations.py`: `get_default_ai_client()` dynamically instantiates `Settings()` to avoid stale singletons when environment variables or `.env` files are updated at runtime.
+  3. `backend/app/domain/recipient_registry.py` & `backend/app/db/models.py`: Created `FictionalRecipientModel` mapped to `fictional_recipients` table with exactly 20 demonstration identities: 8 trusted, 5 unknown, and 7 high-risk (spanning mule accounts, rapid fan-in/fan-out collectors, law-enforcement impersonators, and dubious high-yield platforms).
+  4. `backend/app/db/migrations/versions/0015_create_fictional_recipients.py`: Alembic migration creating `fictional_recipients` table and pre-seeding all 20 records idempotently.
+  5. `backend/app/repositories/recipient_repository.py`: Async repository with `get_by_upi_id`, `get_by_id`, `list_recipients`, and `seed_if_needed()`. Seed integrated into backend lifespan (`main.py`) and test suite setup (`conftest.py`).
+  6. `backend/app/services/customer_dialogue_service.py`: Decoupled call session creation from text-model availability when `GEMINI_LIVE_ENABLED=True` and channel is simulated voice, creating calls in `RINGING` status without blocking on text generation. Scalar transaction fields cached upfront to prevent `MissingGreenlet` errors on expired attributes across commits.
+  7. `backend/app/services/risk_service.py`: In `assess_transaction`, resolves `recipient_identifier` against the database registry; server-controlled authoritative DB values override client-supplied mock flags (`is_trusted_beneficiary`, `is_flagged_mule`, `account_age_days`, `fan_in_count_24h`, `fan_out_count_24h`).
+  8. `backend/app/services/decision_workflow_service.py`: Connected policy decision to selective call initiation. Outbound calls are initiated only when the decision action is `REQUIRE_VERIFICATION`.
+  9. `backend/app/api/customer_dialogue.py`: Customer-scoped tokens are forbidden (`403 FORBIDDEN`) from creating call sessions via REST; call initiation is restricted to bank operators or the automated decision workflow.
+  10. `frontend/src/App.tsx`: Removed unconditional call creation on payment submission. Payment submission initiates the transaction and waits for `/workflow/evaluate`; only when the policy authorizes intervention (`REQUIRE_VERIFICATION`) does the bank call ring.
+  11. `backend/tests/unit/test_recipient_registry.py` & `backend/tests/integration/test_p2_a12_transaction_intelligence.py`: Comprehensive test suites covering registry seeding, lookup, server override of client flags, customer token rejection on call creation, and decoupled call creation.
+- **Verification Commands & Results**:
+  ```bash
+  POSTGRES_PORT=5433 make backend-lint && POSTGRES_PORT=5433 make backend-typecheck # clean
+  POSTGRES_PORT=5433 make backend-test                                              # 351 passed, 1 skipped in 45s
+  make frontend-lint && make frontend-typecheck && make frontend-test               # 65 passed in 11 test files
+  POSTGRES_PORT=5433 make db-verify-migrations                                     # 15 revisions verified up/down/up
+  POSTGRES_PORT=5433 make check-all                                                 # 100% full gate pass
+  ```
+- **Security Notice**: Any Gemini API key previously exposed in conversational context is treated as compromised and must be revoked and regenerated by the repository owner. No secrets are logged or exposed in client payloads.
+
+---
+
 ### Phase 3: Customer Portal & Dynamic Intervention UI
 - **Task P3-A1**: Simulated Banking Customer Payment Flow & Dynamic Intervention UI (`NOT_STARTED`)
 
@@ -825,5 +997,6 @@
 ### Phase 5: End-to-End Scenarios, Hardening & Demonstration
 - **Task P5-A1**: End-to-End Integration of the Six Fraud Demo Scenarios (`NOT_STARTED`)
 - **Task P5-A2**: Final Security Hardening, Audit Trail Verification & Demo Runbook (`NOT_STARTED`)
+
 
 

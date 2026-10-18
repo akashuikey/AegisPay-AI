@@ -210,6 +210,14 @@ class TransactionModel(Base):
         order_by="TransactionResponseModel.created_at.desc()",
     )
 
+    # Relationship to simulated customer call/chat sessions (Option A)
+    call_sessions: Mapped[list["TransactionCallSessionModel"]] = relationship(
+        "TransactionCallSessionModel",
+        back_populates="transaction",
+        cascade="all, delete-orphan",
+        order_by="TransactionCallSessionModel.created_at.desc()",
+    )
+
 
 class TransactionAuditModel(Base):
     """Append-only audit trail recording state transitions and lifecycle events."""
@@ -572,6 +580,11 @@ class InvestigationConversationModel(Base):
         String(32),
         nullable=False,
         default="ACTIVE",
+    )
+    conversation_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="OPERATOR_INVESTIGATION",
     )
     turn_count: Mapped[int] = mapped_column(
         Integer,
@@ -1011,6 +1024,349 @@ class ScenarioRunModel(Base):
         nullable=False,
         server_default=func.now(),
         index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class TransactionCallSessionModel(Base):
+    """Persistent record of a simulated customer voice call or chat session (Option A)."""
+
+    __tablename__ = "transaction_call_sessions"
+    __table_args__ = (
+        Index("ix_call_sessions_tx_created", "transaction_id", "created_at"),
+        Index("ix_call_sessions_conversation", "conversation_id"),
+        UniqueConstraint(
+            "transaction_id",
+            "idempotency_key",
+            name="uq_call_sessions_tx_idempotency",
+        ),
+        # At most one active (non-terminal) call session per transaction. A
+        # read-before-write guard alone cannot prevent two concurrent initiations
+        # from both creating an active session; this partial unique index makes
+        # the invariant atomic at the database layer.
+        Index(
+            "uq_call_sessions_active_tx",
+            "transaction_id",
+            unique=True,
+            postgresql_where=text("status IN ('INITIATED', 'RINGING', 'CONNECTED')"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("investigation_conversations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    channel: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="VOICE_SIMULATED",
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="INITIATED",
+        index=True,
+    )
+    direction: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="OUTBOUND_SIMULATED",
+    )
+    attempt_number: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    coercion_analysis_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transaction_coercion_analyses.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    connected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    duration_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    failure_reason: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    customer_phone_masked: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="+91 ••••• ••890",
+    )
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    # Relationships
+    transaction: Mapped["TransactionModel"] = relationship(
+        "TransactionModel",
+        back_populates="call_sessions",
+    )
+    conversation: Mapped["InvestigationConversationModel | None"] = relationship(
+        "InvestigationConversationModel",
+    )
+    coercion_analysis: Mapped["TransactionCoercionAnalysisModel | None"] = relationship(
+        "TransactionCoercionAnalysisModel",
+    )
+    transcript_segments: Mapped[list["CallTranscriptSegmentModel"]] = relationship(
+        "CallTranscriptSegmentModel",
+        back_populates="call_session",
+        cascade="all, delete-orphan",
+        order_by="CallTranscriptSegmentModel.seq.asc()",
+    )
+
+
+class CallTranscriptSegmentModel(Base):
+    """A durable, monotonically-ordered final transcript segment from a live voice call.
+
+    Only FINAL/CORRECTED segments are persisted (interim partials stream to the UI but
+    are never stored). ``seq`` is a server-assigned monotonic sequence per call session;
+    the ``(call_session_id, seq)`` unique constraint guarantees ordering and prevents
+    duplicate inserts on reconnect/duplicate delivery (P2-A11).
+    """
+
+    __tablename__ = "call_transcript_segments"
+    __table_args__ = (
+        UniqueConstraint("call_session_id", "seq", name="uq_transcript_segments_session_seq"),
+        Index("ix_transcript_segments_session_seq", "call_session_id", "seq"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    call_session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transaction_call_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("investigation_conversations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    speaker: Mapped[str] = mapped_column(String(16), nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="final")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    start_offset_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_offset_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+
+    call_session: Mapped["TransactionCallSessionModel"] = relationship(
+        "TransactionCallSessionModel",
+        back_populates="transcript_segments",
+    )
+
+
+class CallLiveAnalysisModel(Base):
+    """A point-in-time incremental evidence-analysis snapshot for an in-progress call.
+
+    The most recent row (by ``created_at``) for a call session is the current view;
+    older rows are retained as superseded history. The analysis is advisory only and
+    never drives a transaction-state transition (P2-A11 / rules.md §10).
+    """
+
+    __tablename__ = "call_live_analyses"
+    __table_args__ = (
+        Index("ix_call_live_analyses_session_created", "call_session_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    call_session_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transaction_call_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    contract_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="completed")
+    overall_sentiment: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    uncertainty_notes: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    analyzed_through_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    model_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+
+
+class FictionalRecipientModel(Base):
+    """A persistent fictional recipient entity for simulated UPI payments (P2-A12).
+
+    All records are strictly fictional demonstration data. Never represents real
+    individuals, bank accounts, or credentials.
+    """
+
+    __tablename__ = "fictional_recipients"
+    __table_args__ = (
+        UniqueConstraint("upi_id", name="uq_fictional_recipients_upi_id"),
+        Index("ix_fictional_recipients_category", "category"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    upi_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+    display_name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+    bank_name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+    branch_region: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+    account_age_days: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    category: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )  # TRUSTED, UNKNOWN, HIGH_RISK
+    is_trusted_beneficiary: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    is_flagged_mule: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    complaint_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    fan_in_count_24h: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    fan_out_count_24h: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    typical_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2),
+        nullable=True,
+    )
+    typical_frequency: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+    history_summary: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+    seed_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

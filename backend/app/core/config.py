@@ -1,7 +1,7 @@
-"""Application configuration and typed settings."""
-
 import json
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from pydantic import field_validator, model_validator
@@ -9,6 +9,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Environments where development-only conveniences (e.g. OTP display) are allowed.
 _NON_PRODUCTION_ENVS = frozenset({"development", "dev", "local", "test", "testing", "ci"})
+
+# Canonical paths to backend and project root for robust .env loading across execution contexts
+_CONFIG_DIR = Path(__file__).resolve().parent
+_BACKEND_DIR = _CONFIG_DIR.parents[1]
+_REPO_ROOT = _CONFIG_DIR.parents[2]
+_ENV_FILES = (
+    str(_REPO_ROOT / ".env"),
+    str(_BACKEND_DIR / ".env"),
+    ".env",
+    "../.env",
+)
 
 
 class Settings(BaseSettings):
@@ -40,13 +51,44 @@ class Settings(BaseSettings):
 
     # Gemini & Google Cloud Vertex AI Configuration
     AI_PROVIDER: str = "auto"
-    GEMINI_MODEL_ID: str = "gemini-2.5-flash"
+    GEMINI_MODEL_ID: str = "gemini-3.8-flash"
     GCP_PROJECT_ID: str | None = None
     GCP_LOCATION: str = "us-central1"
     GEMINI_API_KEY: str | None = None
     GEMINI_REQUEST_TIMEOUT_SECONDS: float = 30.0
     GEMINI_MAX_RETRIES: int = 2
     INVESTIGATION_MAX_CONVERSATION_TURNS: int = 20
+
+    # Gemini Live API (real-time bidirectional voice) - P2-A11.
+    # Disabled by default; the simulated text/speech dialogue (P2-OptA/A10) is used
+    # until this is explicitly enabled with valid credentials.
+    GEMINI_LIVE_ENABLED: bool = False
+    # Audio-capable Live model identifier. Configurable; never hardcode in logic.
+    # NOTE: model availability changes over time. Verify against the live provider
+    # (``client.models.list()`` -> entries whose ``supported_actions`` include
+    # ``bidiGenerateContent``) before changing this. The legacy
+    # ``gemini-2.0-flash-live-001`` id was retired; current audio-capable Live models
+    # include ``gemini-3.8-live`` and ``gemini-3.1-flash-live-preview`` (P2-A13).
+    GEMINI_LIVE_MODEL: str = "gemini-3.8-live"
+    # Supported prebuilt voice name for spoken responses.
+    GEMINI_LIVE_VOICE: str = "Aoede"
+    # Bounded live session duration (safety / resource cap).
+    GEMINI_LIVE_MAX_SESSION_SECONDS: int = 300
+    # Audio formats required by the Live API: 16 kHz PCM16 in, 24 kHz PCM16 out.
+    GEMINI_LIVE_INPUT_SAMPLE_RATE: int = 16000
+    GEMINI_LIVE_OUTPUT_SAMPLE_RATE: int = 24000
+    # Per-frame inbound audio cap (bytes) and bounded queue depths (backpressure).
+    GEMINI_LIVE_MAX_AUDIO_FRAME_BYTES: int = 32768
+    GEMINI_LIVE_AUDIO_QUEUE_MAXSIZE: int = 256
+    GEMINI_LIVE_TRANSCRIPT_QUEUE_MAXSIZE: int = 512
+    # Concurrent live sessions allowed process-wide (resource cap).
+    GEMINI_LIVE_MAX_CONCURRENT_SESSIONS: int = 8
+    # Incremental analysis cadence: run when this many new final segments accrue
+    # or this many seconds elapse, whichever comes first (bounded LLM usage).
+    GEMINI_LIVE_ANALYSIS_MIN_NEW_SEGMENTS: int = 2
+    GEMINI_LIVE_ANALYSIS_INTERVAL_SECONDS: float = 6.0
+    # Bounded recent-context window (transcript segments) fed to incremental analysis.
+    GEMINI_LIVE_ANALYSIS_CONTEXT_SEGMENTS: int = 12
 
     # Authentication & Authorization (operator identity boundary)
     # AUTH_JWT_SECRET has no insecure default: auth fails closed until it is configured.
@@ -77,10 +119,27 @@ class Settings(BaseSettings):
     VERIFICATION_CHALLENGE_WINDOW_SECONDS: int = 3600
 
     model_config = SettingsConfigDict(
-        env_file=(".env", "../.env"),
+        env_file=_ENV_FILES,
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @field_validator("GEMINI_API_KEY", mode="before")
+    @classmethod
+    def assemble_gemini_api_key(cls, value: Any) -> str | None:
+        """Sanitize GEMINI_API_KEY and check common aliases if unset."""
+        if isinstance(value, str):
+            cleaned = value.strip().strip("'\"")
+            if cleaned:
+                return cleaned
+        # Check environment variable fallbacks
+        for alias in ("GOOGLE_API_KEY", "AI_STUDIO_API_KEY"):
+            alias_val = os.environ.get(alias)
+            if alias_val:
+                cleaned_alias = alias_val.strip().strip("'\"")
+                if cleaned_alias:
+                    return cleaned_alias
+        return None
 
     @model_validator(mode="after")
     def constrain_dev_only_flags(self) -> "Settings":
@@ -96,6 +155,21 @@ class Settings(BaseSettings):
             and self.APP_ENV.strip().lower() not in _NON_PRODUCTION_ENVS
         ):
             object.__setattr__(self, "VERIFICATION_EXPOSE_DEV_OTP", False)
+        return self
+
+    @model_validator(mode="after")
+    def validate_live_voice_credentials(self) -> "Settings":
+        """Fail clearly if Gemini Live is enabled without usable credentials.
+
+        The Live API needs either a Gemini API key or a Vertex AI project. Enabling
+        the feature flag without one is a misconfiguration we surface at startup
+        rather than failing opaquely on the first WebSocket connection.
+        """
+        if self.GEMINI_LIVE_ENABLED and not (self.GEMINI_API_KEY or self.GCP_PROJECT_ID):
+            raise ValueError(
+                "GEMINI_LIVE_ENABLED is true but neither GEMINI_API_KEY nor GCP_PROJECT_ID "
+                "is configured; real-time voice cannot authenticate to Gemini Live."
+            )
         return self
 
     @field_validator("CORS_ORIGINS", mode="before")

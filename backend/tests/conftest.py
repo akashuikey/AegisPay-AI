@@ -34,6 +34,11 @@ def get_test_settings() -> Settings:
         AUTH_JWT_SECRET="test-jwt-secret-not-for-production",
         AUTH_ACCESS_TOKEN_EXPIRE_MINUTES=60,
         VERIFICATION_EXPOSE_DEV_OTP=True,
+        GEMINI_API_KEY=None,
+        GCP_PROJECT_ID=None,
+        # Keep tests hermetic and independent of a developer .env that may enable
+        # Live voice; individual tests opt in via model_copy(update=...).
+        GEMINI_LIVE_ENABLED=False,
     )
 
 
@@ -74,6 +79,14 @@ async def setup_test_db() -> AsyncGenerator[None, None]:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+
+    # Seed fictional recipient registry for tests
+    from app.repositories.recipient_repository import RecipientRepository
+
+    session_factory = get_test_session_factory()
+    async with session_factory() as session:
+        await RecipientRepository(session).seed_if_needed()
+
     yield
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -153,6 +166,9 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
     import uuid as _uuid
 
     from app.api.auth import get_current_operator
+    from app.api.customer_dialogue import (
+        get_current_operator_optional as get_current_operator_optional_dialogue,
+    )
     from app.api.fraud_responses import get_current_operator_optional
     from app.db.models import OperatorModel
 
@@ -165,6 +181,7 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
     )
     app.dependency_overrides[get_current_operator] = lambda: stub_operator
     app.dependency_overrides[get_current_operator_optional] = lambda: stub_operator
+    app.dependency_overrides[get_current_operator_optional_dialogue] = lambda: stub_operator
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as async_client:

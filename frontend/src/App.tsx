@@ -19,6 +19,23 @@ import {
   SCENARIO_CATALOG,
   TransactionEvidenceInput,
 } from './api/riskApi';
+import { config } from './config';
+import { apiFetch, getToken } from './api/authApi';
+import {
+  initiateCallSessionApi,
+  connectCallSessionApi,
+  submitDialogueTurnApi,
+  completeCallSessionApi,
+  declineCallSessionApi,
+  getLatestCallSessionApi,
+  CallSessionResponse,
+} from './api/customerDialogueApi';
+import {
+  LiveVoiceConnection,
+  isLiveVoiceSupported,
+  type LiveAnalysisEvent,
+  type LiveStatus,
+} from './api/liveVoiceClient';
 
 type Scenario =
   | 'digital_arrest'
@@ -94,6 +111,8 @@ type Tx = {
   concern?: boolean;
   scenario?: Scenario;
   assessment?: RiskAssessmentResponse;
+  backendId?: string;
+  callSessionId?: string;
 };
 
 const scenarios: Record<
@@ -479,8 +498,20 @@ function App() {
   const [agentCategory, setAgentCategory] = useState('Gift cards');
   const [agentAmount, setAgentAmount] = useState('4500');
 
+  const [dynamicQuestion, setDynamicQuestion] = useState<string>('');
+  const [activeCallSession, setActiveCallSession] = useState<CallSessionResponse | null>(null);
+  // Real-time Gemini Live voice (P2-A11). Only attempted in browsers that support
+  // audio capture; otherwise the existing simulated voice/chat path is used.
+  const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
+  const [liveTranscript, setLiveTranscript] = useState<{ speaker: string; text: string }[]>([]);
+  const [liveAnalysis, setLiveAnalysis] = useState<LiveAnalysisEvent | null>(null);
+
   const timers = useRef<number[]>([]);
   const recognition = useRef<SpeechRecognitionLike | null>(null);
+  // Guards against duplicate turn submissions from rapid repeated clicks.
+  const submittingTurn = useRef(false);
+  // Active real-time live-voice connection, if any (P2-A11).
+  const liveConn = useRef<LiveVoiceConnection | null>(null);
   const activeRef = useRef(activeId);
   activeRef.current = activeId;
   const stageRef = useRef(stage);
@@ -495,7 +526,12 @@ function App() {
   }, []);
   const voiceSupported = Boolean(speechConstructor);
 
-  const questions = useMemo(() => {
+  const currentQuestion = useMemo(() => {
+    if (dynamicQuestion) return dynamicQuestion;
+    if (activeCallSession && Array.isArray(activeCallSession.turns) && activeCallSession.turns.length > 0) {
+      const lastAsst = [...activeCallSession.turns].reverse().find((t) => t.role === 'assistant');
+      if (lastAsst?.content) return lastAsst.content;
+    }
     const list = [...initialQuestions];
     const statements = activeTx?.statements ?? [];
     if (
@@ -505,9 +541,15 @@ function App() {
     ) {
       list.push('Did they ask you to act urgently or keep this payment secret?');
     }
-    return list;
-  }, [activeTx?.statements]);
-  const currentQuestion = questions[Math.min(questionIndex, questions.length - 1)];
+    return list[Math.min(questionIndex, list.length - 1)];
+  }, [dynamicQuestion, activeCallSession, questionIndex, activeTx?.statements]);
+
+  const questionsCount = useMemo(() => {
+    if (activeCallSession && Array.isArray(activeCallSession.turns)) {
+      return Math.max(3, activeCallSession.turns.length + 1);
+    }
+    return 3;
+  }, [activeCallSession]);
 
   const clearRuntime = useCallback(() => {
     timers.current.forEach(window.clearTimeout);
@@ -518,6 +560,13 @@ function App() {
       /* browser may already have ended */
     }
     recognition.current = null;
+    if (liveConn.current) {
+      void liveConn.current.end('ended');
+      liveConn.current = null;
+    }
+    setLiveStatus(null);
+    setLiveTranscript([]);
+    setLiveAnalysis(null);
     if ('speechSynthesis' in window) window.speechSynthesis.cancel();
     setAssistantSpeaking(false);
   }, []);
@@ -571,6 +620,8 @@ function App() {
     setMobileView('bank');
     setSurface(next === 'agent' ? 'Agent Payments' : 'Live Payments');
     setAgentResult('idle');
+    setDynamicQuestion('');
+    setActiveCallSession(null);
   }
 
   function schedule(fn: () => void, delay: number) {
@@ -702,19 +753,154 @@ function App() {
       patchTx(id, { assessment: res });
     });
 
-    schedule(() => {
-      patchTx(id, {
-        call: 'Calling',
-        process: 'Waiting for customer to answer',
-        audit: [makeAudit('Call ringing', 'Aster Bank Verification call is ringing.')],
-      });
-      setStage((s) => (activeRef.current === id && s === 'pending' ? 'ringing' : s));
-      schedule(() => {
-        if (activeRef.current === id && stageRef.current === 'ringing') {
-          incomplete('The customer did not answer the simulated call.', 'No answer');
+    // Create backend transaction and evaluate automated decision workflow
+    apiFetch(`${config.apiBaseUrl}/api/v1/transactions`, {
+      method: 'POST',
+      body: JSON.stringify({
+        customer_id: 'CU-1042',
+        idempotency_key: `idemp_${id}`,
+        amount: Number(amount),
+        currency: 'INR',
+        payment_rail: 'UPI',
+        recipient_name: recipient.trim(),
+        recipient_identifier: reference.trim() || `${recipient.trim().toLowerCase().replace(/[^a-z0-9]/g, '')}@upi`,
+        purpose: purpose.trim() || undefined,
+      }),
+    })
+      .then(async (res) => {
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data as { id: string };
+      })
+      .then(async (backendTx) => {
+        if (!backendTx?.id) return;
+        patchTx(id, { backendId: backendTx.id });
+        try {
+          // Run automated decision workflow on backend
+          const evalRes = await apiFetch(`${config.apiBaseUrl}/api/v1/transactions/${backendTx.id}/workflow/evaluate`, {
+            method: 'POST',
+            body: JSON.stringify({
+              evidence: evidenceInput,
+            }),
+          });
+          if (evalRes.ok) {
+            const decisionData = await evalRes.json();
+            const action = decisionData?.action;
+
+            const requiresVerification =
+              action === 'REQUIRE_VERIFICATION' ||
+              action === 'HOLD_FOR_INVESTIGATION' ||
+              decisionData?.requires_verification === true ||
+              (!action &&
+                (initialAssessment?.recommended_action === 'REQUIRE_VERIFICATION' ||
+                  initialAssessment?.recommended_action === 'HOLD_FOR_INVESTIGATION'));
+
+            if (requiresVerification) {
+              // Policy authorized customer intervention call!
+              let callSession = await getLatestCallSessionApi(backendTx.id).catch(() => null);
+              if (!callSession) {
+                callSession = await initiateCallSessionApi(backendTx.id).catch(() => null);
+              }
+              const terminalCallStatuses = [
+                'FAILED',
+                'CANCELLED',
+                'TIMED_OUT',
+                'DECLINED',
+                'COMPLETED',
+              ];
+              if (callSession && terminalCallStatuses.includes(callSession.status)) {
+                // The bank-initiated call could not be established (e.g. Gemini Live
+                // unavailable / misconfigured). The deterministic protective decision
+                // stands; we surface the intervention failure and offer a safe retry
+                // instead of pretending the phone is ringing.
+                const reasonDetail = callSession.failure_reason
+                  ? `Automated verification call could not be completed (${callSession.failure_reason}).`
+                  : 'The automated bank verification call could not be established.';
+                patchTx(id, {
+                  callSessionId: callSession.id,
+                  payment: 'Verification incomplete',
+                  call: 'Error',
+                  process: 'Call could not be established',
+                  reason: `${reasonDetail} The payment remains held for verification; no money was sent.`,
+                  audit: [makeAudit('Call failed', reasonDetail)],
+                });
+                setActiveCallSession(callSession);
+                setStage('incomplete');
+              } else {
+                if (callSession) {
+                  patchTx(id, {
+                    callSessionId: callSession.id,
+                    call: 'Calling',
+                    process: 'Waiting for customer to answer',
+                    audit: [makeAudit('Call ringing', 'Aster Bank Verification call is ringing.')],
+                  });
+                  setActiveCallSession(callSession);
+                  if (Array.isArray(callSession?.turns) && callSession.turns.length > 0) {
+                    const firstAsst = callSession.turns.find((t) => t.role === 'assistant');
+                    if (firstAsst?.content) {
+                      setDynamicQuestion(firstAsst.content);
+                    }
+                  }
+                } else {
+                  patchTx(id, {
+                    call: 'Calling',
+                    process: 'Waiting for customer to answer',
+                    audit: [makeAudit('Call ringing', 'Aster Bank Verification call is ringing.')],
+                  });
+                }
+                setStage('ringing');
+                schedule(() => {
+                  if (activeRef.current === id && stageRef.current === 'ringing') {
+                    incomplete('The customer did not answer the simulated call.', 'No answer');
+                  }
+                }, 12000);
+              }
+            } else if (action === 'ALLOW') {
+              patchTx(id, {
+                payment: 'Completed without check',
+                call: 'Not required',
+                process: 'Complete',
+                reason: 'Transaction evaluated safe by risk policy; verification not required.',
+                audit: [makeAudit('Payment completed', 'Transaction authorized and settled safely.')],
+              });
+              setStage('outcome');
+            } else if (action === 'BLOCK') {
+              patchTx(id, {
+                payment: 'Cancelled',
+                call: 'Not required',
+                process: 'Cancelled for safety',
+                reason: 'Transaction blocked due to high fraud risk.',
+                audit: [makeAudit('Payment blocked', 'Transaction blocked by automated policy.')],
+              });
+              setStage('outcome');
+            }
+          } else {
+            if (
+              initialAssessment?.recommended_action === 'REQUIRE_VERIFICATION' ||
+              initialAssessment?.recommended_action === 'HOLD_FOR_INVESTIGATION'
+            ) {
+              setStage('ringing');
+            }
+          }
+        } catch (err) {
+          console.warn('Could not complete workflow evaluation on backend:', err);
+          if (
+            initialAssessment?.recommended_action === 'REQUIRE_VERIFICATION' ||
+            initialAssessment?.recommended_action === 'HOLD_FOR_INVESTIGATION'
+          ) {
+            setStage('ringing');
+          }
         }
-      }, 12000);
-    }, 1000);
+      })
+      .catch((err) => {
+        console.warn('Could not create transaction on backend:', err);
+        if (
+          initialAssessment?.recommended_action === 'REQUIRE_VERIFICATION' ||
+          initialAssessment?.recommended_action === 'HOLD_FOR_INVESTIGATION'
+        ) {
+          setStage('ringing');
+        }
+      });
   }
 
   function retry(transactionId = activeId) {
@@ -728,6 +914,8 @@ function App() {
     setDraft('');
     setDraftSource('typed');
     setMicMuted(false);
+    setDynamicQuestion('');
+    setActiveCallSession(null);
     setActiveId(transactionId);
     patchTx(
       transactionId,
@@ -743,6 +931,21 @@ function App() {
         detail: `Attempt ${tx.attempt + 1} · same transaction; no duplicate payment created.`,
       }
     );
+    if (tx.backendId) {
+      initiateCallSessionApi(tx.backendId, {
+        channel: 'VOICE_SIMULATED',
+        idempotency_key: `retry_call_${transactionId}_${tx.attempt + 1}`,
+      })
+        .then((callSession) => {
+          patchTx(transactionId, { callSessionId: callSession.id });
+          setActiveCallSession(callSession);
+          if (Array.isArray(callSession?.turns) && callSession.turns.length > 0) {
+            const firstAsst = callSession.turns.find((t) => t.role === 'assistant');
+            if (firstAsst?.content) setDynamicQuestion(firstAsst.content);
+          }
+        })
+        .catch((err) => console.warn('Could not re-initiate call session on retry:', err));
+    }
     setStage('ringing');
     if (guided) setSelectedId(transactionId);
     schedule(() => {
@@ -768,6 +971,27 @@ function App() {
     );
     setStage('incomplete');
     if (!preserveError) setVoiceError('');
+
+    const tx = records.find((r) => r.id === id);
+    if (tx?.callSessionId) {
+      const terminalCallStatuses = ['FAILED', 'CANCELLED', 'TIMED_OUT', 'DECLINED', 'COMPLETED'];
+      const alreadyTerminal =
+        activeCallSession?.id === tx.callSessionId &&
+        terminalCallStatuses.includes(activeCallSession?.status ?? '');
+      if (alreadyTerminal) {
+        // The call is already in a terminal state (e.g. a failed Live connection).
+        // Never attempt to decline/complete it again — the backend would reject the
+        // invalid transition, and the lifecycle audit trail must not be rewritten.
+      } else if (call === 'Declined' || call === 'No answer') {
+        declineCallSessionApi(tx.callSessionId, { reason: reasonText }).catch((err) =>
+          console.warn('Could not decline call session on backend:', err)
+        );
+      } else {
+        completeCallSessionApi(tx.callSessionId).catch((err) =>
+          console.warn('Could not complete call session on backend:', err)
+        );
+      }
+    }
   }
 
   function cancelPayment() {
@@ -829,10 +1053,35 @@ function App() {
             : 'Customer chose secure chat; no microphone permission requested.',
       }
     );
+    const terminalCallStatuses = ['FAILED', 'CANCELLED', 'TIMED_OUT', 'DECLINED', 'COMPLETED'];
+    const callIsTerminal =
+      activeCallSession?.id === tx?.callSessionId &&
+      terminalCallStatuses.includes(activeCallSession?.status ?? '');
+    if (tx?.callSessionId && !callIsTerminal) {
+      connectCallSessionApi(tx.callSessionId)
+        .then((updated) => {
+          setActiveCallSession(updated);
+        })
+        .catch((err) => {
+          console.warn('Could not connect call session on backend:', err);
+        });
+    }
     if (modeChoice === 'voice') startVoice();
   }
 
   function startVoice() {
+    // Prefer real-time Gemini Live voice when the browser supports audio capture and
+    // a backend call session exists. If it cannot be established, we explicitly fall
+    // back to the existing voice/chat path (never silently while claiming Live).
+    const callSessionId = activeTx?.callSessionId;
+    if (isLiveVoiceSupported() && callSessionId) {
+      startLiveVoice(callSessionId);
+      return;
+    }
+    startBrowserVoice();
+  }
+
+  function startBrowserVoice() {
     if (!speechConstructor) {
       const message = 'Speech recognition is not supported in this browser. No audio was captured.';
       setVoiceError(message);
@@ -844,6 +1093,60 @@ function App() {
       return;
     }
     beginRecognition();
+  }
+
+  function startLiveVoice(callSessionId: string) {
+    // Tear down any prior connection first (re-entrant start / reconnect).
+    if (liveConn.current) {
+      void liveConn.current.end('restart');
+      liveConn.current = null;
+    }
+    const id = activeRef.current;
+    setLiveTranscript([]);
+    setLiveAnalysis(null);
+    const conn = new LiveVoiceConnection(
+      { callId: callSessionId, token: getToken(), baseUrl: config.apiBaseUrl, workletUrl: '/audio/pcm-capture-worklet.js' },
+      {
+        onStatus: (status) => {
+          setLiveStatus(status);
+          if (id) {
+            const label =
+              status === 'live'
+                ? 'Live voice connected'
+                : status === 'connecting'
+                  ? 'Connecting live voice'
+                  : status === 'reconnecting'
+                    ? 'Reconnecting live voice'
+                    : status === 'requesting-mic'
+                      ? 'Requesting microphone'
+                      : undefined;
+            if (label) setProcess(id, label, 'In progress');
+          }
+        },
+        onTranscript: (seg) => {
+          if (seg.final) {
+            setLiveTranscript((prev) => [...prev, { speaker: seg.speaker, text: seg.text }]);
+            if (seg.speaker === 'assistant') setDynamicQuestion(seg.text);
+          }
+        },
+        onAnalysis: (analysis) => setLiveAnalysis(analysis),
+        onError: (message) => setVoiceError(message),
+        onClosed: () => {
+          liveConn.current = null;
+        },
+      }
+    );
+    liveConn.current = conn;
+    void conn.start().then(() => {
+      // If Live could not be established, fall back to the standard voice path.
+      if (conn.getStatus() === 'unavailable') {
+        liveConn.current = null;
+        setVoiceError(
+          'Live voice is unavailable; continuing with standard verification. No audio was lost.'
+        );
+        startBrowserVoice();
+      }
+    });
   }
 
   function beginRecognition() {
@@ -961,6 +1264,10 @@ function App() {
   function finishAnswer(value = draft, source: Statement['source'] = 'typed') {
     const answerText = value.trim();
     if (!answerText || !activeId) return;
+    // Prevent duplicate turn submissions from repeated clicks or key events while
+    // one is already in flight.
+    if (submittingTurn.current) return;
+    submittingTurn.current = true;
     try {
       recognition.current?.stop();
     } catch {
@@ -983,38 +1290,94 @@ function App() {
     setDraft('');
     setDraftSource('typed');
     setStage('processing');
-    schedule(() => {
-      const followup =
-        nextStatements.some((s) =>
-          /urgent|secret|safe account|pressure|quickly|don't tell|not tell/i.test(s.answer)
-        ) && nextStatements.length === 3;
-      if (nextStatements.length < 3 || followup) {
-        setQuestionIndex(nextStatements.length);
-        setStage(mode === 'voice' && voiceSupported ? 'active' : 'chat');
-        setProcess(
-          activeId,
-          `Question ${nextStatements.length + 1} of ${followup ? 4 : 3}`,
-          mode === 'voice' ? 'In progress' : 'In progress'
-        );
-        if (mode === 'voice') {
-          const upcoming =
-            nextStatements.length === 3 && followup
-              ? 'Did they ask you to act urgently or keep this payment secret?'
-              : questions[Math.min(nextStatements.length, questions.length - 1)];
-          schedule(() => speakQuestion(upcoming), 180);
-        }
-      } else evaluate(activeId, nextStatements);
-    }, 750);
+
+    const fallbackTurnProgression = (stmts: Statement[]) => {
+      schedule(() => {
+        const followup =
+          stmts.some((s) =>
+            /urgent|secret|safe account|pressure|quickly|don't tell|not tell/i.test(s.answer)
+          ) && stmts.length === 3;
+        if (stmts.length < 3 || followup) {
+          setQuestionIndex(stmts.length);
+          setStage(mode === 'voice' && voiceSupported ? 'active' : 'chat');
+          setProcess(
+            activeId,
+            `Question ${stmts.length + 1} of ${followup ? 4 : 3}`,
+            mode === 'voice' ? 'In progress' : 'In progress'
+          );
+          if (mode === 'voice') {
+            const upcoming =
+              stmts.length === 3 && followup
+                ? 'Did they ask you to act urgently or keep this payment secret?'
+                : initialQuestions[Math.min(stmts.length, initialQuestions.length - 1)];
+            schedule(() => speakQuestion(upcoming), 180);
+          }
+        } else evaluate(activeId, stmts);
+      }, 750);
+    };
+
+    const callSessionId = activeTx?.callSessionId;
+    if (callSessionId) {
+      // A stable per-answer token makes the submission idempotent so a network
+      // retry (or a duplicate delivery) cannot append the same turn twice.
+      const clientTurnId =
+        globalThis.crypto?.randomUUID?.() ??
+        `turn_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      submitDialogueTurnApi(callSessionId, {
+        customer_message: answerText,
+        source: source === 'speech' ? 'speech' : 'typed',
+        client_turn_id: clientTurnId,
+      })
+        .then((updatedSession) => {
+          setActiveCallSession(updatedSession);
+          const lastAsst = [...updatedSession.turns].reverse().find((t) => t.role === 'assistant');
+          if (lastAsst?.content) {
+            setDynamicQuestion(lastAsst.content);
+          }
+          const isTerminal =
+            updatedSession.status === 'COMPLETED' ||
+            Boolean(lastAsst?.is_terminal_turn) ||
+            nextStatements.length >= 6;
+
+          schedule(() => {
+            if (isTerminal) {
+              evaluate(activeId, nextStatements);
+            } else {
+              setQuestionIndex(nextStatements.length);
+              setStage(mode === 'voice' && voiceSupported ? 'active' : 'chat');
+              setProcess(
+                activeId,
+                `Question ${nextStatements.length + 1} of ${Math.max(nextStatements.length + 1, 3)}`,
+                mode === 'voice' ? 'In progress' : 'In progress'
+              );
+              if (mode === 'voice' && lastAsst?.content) {
+                schedule(() => speakQuestion(lastAsst.content), 180);
+              }
+            }
+          }, 750);
+        })
+        .catch((err) => {
+          console.warn('Backend turn submission failed, using local dialogue logic:', err);
+          fallbackTurnProgression(nextStatements);
+        })
+        .finally(() => {
+          submittingTurn.current = false;
+        });
+    } else {
+      fallbackTurnProgression(nextStatements);
+      submittingTurn.current = false;
+    }
   }
 
   function demoResponse() {
     const tx = activeTx;
     if (!tx) return;
     let text = '';
-    if (/what is this payment/i.test(currentQuestion)) {
+    const q = currentQuestion.toLowerCase();
+    if (/payment|purpose|why|reason|transfer/i.test(q)) {
       text =
         scenario === 'digital_arrest' || scenario === 'impersonation'
-          ? 'Law enforcement called claiming my identity is linked to a CBI money laundering case; they instructed me to deposit funds.'
+          ? 'Law enforcement called claiming my identity is linked to a CBI money laundering case; they instructed me to deposit funds immediately.'
           : scenario === 'investment_scam'
             ? 'Apex Yield promised guaranteed daily profit on a private crypto fund; they urged me to transfer before market close.'
             : scenario === 'fake_invoice'
@@ -1024,7 +1387,7 @@ function App() {
                 : scenario === 'verified'
                   ? 'Aster Bank asked me to make the settlement transfer.'
                   : 'This is an annual lease renewal payment.';
-    } else if (/who asked/i.test(currentQuestion)) {
+    } else if (/who|official|asked|instruct|person|contact/i.test(q)) {
       text =
         scenario === 'digital_arrest' || scenario === 'impersonation'
           ? 'An official identifying as CBI officer Sharma with urgent arrest warrant.'
@@ -1037,7 +1400,7 @@ function App() {
                 : scenario === 'verified'
                   ? 'Aster Bank gave me the instruction.'
                   : 'The landlord representative.';
-    } else if (/reference/i.test(currentQuestion)) {
+    } else if (/reference|number|code|id|file/i.test(q)) {
       text =
         scenario === 'verified'
           ? 'The reference is ASB-48219.'
@@ -1046,8 +1409,18 @@ function App() {
             : scenario === 'investment_scam'
               ? 'VIP Investment Code INV-39210.'
               : 'They did not give me a reference number.';
+    } else if (/urgent|secret|safe account|pressure|call|screen|police|threat|arrest/i.test(q)) {
+      text =
+        scenario === 'digital_arrest'
+          ? 'Yes, they told me I am under digital arrest and will be detained if I speak to anyone or hang up.'
+          : scenario === 'investment_scam'
+            ? 'They said the high yield opportunity closes in 30 minutes and I must not disclose it.'
+            : 'They insisted it was urgent and ordered me not to discuss it with bank staff.';
     } else {
-      text = 'They insisted it was urgent and ordered me not to discuss it with bank staff.';
+      text =
+        scenario === 'digital_arrest'
+          ? 'Yes, they demanded that I keep the phone line connected and send the security bond now.'
+          : 'I am making this transfer as requested.';
     }
     setDraft(text);
     setDraftSource('demo response');
@@ -1644,7 +2017,7 @@ function App() {
                   mode={mode}
                   question={currentQuestion}
                   questionIndex={questionIndex}
-                  questionsCount={questions.length}
+                  questionsCount={questionsCount}
                   draft={draft}
                   setDraft={(v) => {
                     setDraft(v);
@@ -1678,6 +2051,41 @@ function App() {
                   consent={consent}
                   setConsent={setConsent}
                 />
+                {liveStatus && (
+                  <div className="phone-panel" data-testid="live-voice-panel" style={{ marginTop: 10 }}>
+                    <div className="card-kicker">
+                      SIMULATED LIVE VOICE · {liveStatus.toUpperCase().replace('-', ' ')}
+                    </div>
+                    <p className="phone-mic" style={{ marginTop: 4 }}>
+                      Real-time AI voice (simulated demo, no real phone network). Observations below
+                      are preliminary AI evidence — the deterministic policy engine decides the
+                      payment outcome.
+                    </p>
+                    {liveTranscript.length > 0 && (
+                      <div className="live-transcript" data-testid="live-transcript">
+                        {liveTranscript.slice(-6).map((seg, i) => (
+                          <div key={i} className="live-transcript-row">
+                            <strong>{seg.speaker === 'assistant' ? 'Assistant' : 'Customer'}:</strong>{' '}
+                            {seg.text}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div
+                      className="processing-step"
+                      data-testid="live-analysis-status"
+                      style={{ marginTop: 6 }}
+                    >
+                      {liveAnalysis
+                        ? liveAnalysis.status === 'completed'
+                          ? `Evidence analysis: ${liveAnalysis.overall_sentiment ?? 'reviewing'}`
+                          : liveAnalysis.status === 'unavailable'
+                            ? 'Evidence analysis: temporarily unavailable'
+                            : 'Evidence analysis: processing…'
+                        : 'Evidence analysis: pending'}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           ) : surface === 'Settings' ? (
@@ -2629,22 +3037,22 @@ function TransactionDrawer({
         {tab === 'AI Investigation' && (
           <>
             <InvestigationReviewPanel
-              transactionId={tx.id}
+              transactionId={tx.backendId || tx.id}
               transactionReference={tx.reference}
               transactionStatus={tx.payment}
               riskScore={tx.assessment?.risk_score ?? null}
               riskLevel={tx.assessment?.risk_level ?? null}
             />
-            <VerificationPanel transactionId={tx.id} />
-            <CoercionAnalysisPanel transactionId={tx.id} />
+            <VerificationPanel transactionId={tx.backendId || tx.id} />
+            <CoercionAnalysisPanel transactionId={tx.backendId || tx.id} />
             <CustomerInterventionPanel
-              transactionId={tx.id}
+              transactionId={tx.backendId || tx.id}
               transactionRecipient={tx.recipient}
               transactionAmount={tx.amount}
               onResponseExecuted={onRetry}
             />
             <InvestigationConversationPanel
-              transactionId={tx.id}
+              transactionId={tx.backendId || tx.id}
               transactionRecipient={tx.recipient}
               transactionAmount={tx.amount}
             />
@@ -2654,7 +3062,7 @@ function TransactionDrawer({
         {tab === 'Decision & history' && (
           <>
             <CustomerInterventionPanel
-              transactionId={tx.id}
+              transactionId={tx.backendId || tx.id}
               transactionRecipient={tx.recipient}
               transactionAmount={tx.amount}
               onResponseExecuted={onRetry}

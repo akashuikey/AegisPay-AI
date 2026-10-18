@@ -24,8 +24,9 @@ import {
 import {
   AnalyzeCoercionRequest,
   CoercionAnalysisResponse,
+  CoercionLifecycleStatus,
   analyzeCoercionApi,
-  getLatestCoercionApi,
+  getCoercionLifecycleApi,
 } from '../api/coercionApi';
 
 interface CoercionAnalysisPanelProps {
@@ -61,8 +62,20 @@ const SAMPLE_TRANSCRIPTS: Record<string, { label: string; transcript: string; st
   },
 };
 
+const LIFECYCLE_STYLE: Record<
+  CoercionLifecycleStatus,
+  { label: string; bg: string; fg: string; border: string }
+> = {
+  not_started: { label: 'Not started', bg: '#f1f5f9', fg: '#475569', border: '#cbd5e1' },
+  in_progress: { label: 'In progress', bg: '#eff6ff', fg: '#1d4ed8', border: '#bfdbfe' },
+  completed: { label: 'Completed', bg: '#f0fdf4', fg: '#166534', border: '#bbf7d0' },
+  failed: { label: 'Analysis failed', bg: '#fef3c7', fg: '#92400e', border: '#fde68a' },
+};
+
 export function CoercionAnalysisPanel({ transactionId, onAnalyzed }: CoercionAnalysisPanelProps) {
   const [analysis, setAnalysis] = useState<CoercionAnalysisResponse | null>(null);
+  const [lifecycleStatus, setLifecycleStatus] = useState<CoercionLifecycleStatus | null>(null);
+  const [lifecycleDetail, setLifecycleDetail] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,12 +89,15 @@ export function CoercionAnalysisPanel({ transactionId, onAnalyzed }: CoercionAna
   const isMounted = useRef(true);
 
   const fetchLatest = useCallback(async () => {
+    if (!transactionId || transactionId.startsWith('AST-')) return;
     setLoading(true);
     setError(null);
     try {
-      const data = await getLatestCoercionApi(transactionId);
+      const data = await getCoercionLifecycleApi(transactionId);
       if (isMounted.current) {
-        setAnalysis(data);
+        setAnalysis(data.analysis);
+        setLifecycleStatus(data.status);
+        setLifecycleDetail(data.detail);
       }
     } catch (err: unknown) {
       if (isMounted.current) {
@@ -131,6 +147,8 @@ export function CoercionAnalysisPanel({ transactionId, onAnalyzed }: CoercionAna
       const result = await analyzeCoercionApi(transactionId, payload);
       if (isMounted.current) {
         setAnalysis(result);
+        setLifecycleStatus(result.status === 'UNAVAILABLE' ? 'failed' : 'completed');
+        setLifecycleDetail('');
         onAnalyzed?.();
       }
     } catch (err: unknown) {
@@ -211,6 +229,30 @@ export function CoercionAnalysisPanel({ transactionId, onAnalyzed }: CoercionAna
         duress, and social engineering coercion. Voice stress is advisory only and never proof of
         fraud.
       </p>
+
+      {lifecycleStatus && (
+        <div
+          data-testid="coercion-lifecycle-status"
+          data-status={lifecycleStatus}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 10px',
+            borderRadius: 6,
+            fontSize: 12,
+            marginBottom: 12,
+            background: LIFECYCLE_STYLE[lifecycleStatus].bg,
+            color: LIFECYCLE_STYLE[lifecycleStatus].fg,
+            border: `1px solid ${LIFECYCLE_STYLE[lifecycleStatus].border}`,
+          }}
+        >
+          <strong style={{ letterSpacing: '0.03em' }}>
+            {LIFECYCLE_STYLE[lifecycleStatus].label}
+          </strong>
+          {lifecycleDetail && <span style={{ opacity: 0.9 }}>{lifecycleDetail}</span>}
+        </div>
+      )}
 
       {error && (
         <div

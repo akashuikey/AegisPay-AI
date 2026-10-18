@@ -7,7 +7,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings
 from app.db.models import TransactionInvestigationModel
 from app.db.session import get_db_session
 from app.domain.investigation import (
@@ -39,6 +38,7 @@ def get_default_ai_client() -> AIInvestigationClient:
     - 'auto', 'vertex_ai', 'gemini_api': Official Google GenAI client, requiring
       either GCP_PROJECT_ID or GEMINI_API_KEY.
     """
+    from app.core.config import Settings
     from app.core.errors import AIConfigurationError
     from app.services.ai_client import MockGeminiClient
 

@@ -13,10 +13,12 @@ from app.api.investigations import (
     get_investigation_service,
 )
 from app.api.verification import get_verification_service
+from app.core.config import Settings, get_settings
 from app.db.models import TransactionDecisionModel
 from app.db.session import get_db_session
 from app.domain.decision_policy import PolicyAction
 from app.domain.risk_engine import RecommendedAction, RiskLevel
+from app.repositories.recipient_repository import RecipientRepository
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.decision import DecisionResponse, EvaluateTransactionRequest
 from app.schemas.investigation import (
@@ -42,6 +44,8 @@ from app.schemas.transaction import (
 )
 from app.schemas.verification import CreateChallengeResponse, VerificationStatusResponse
 from app.services.ai_client import AIInvestigationClient
+from app.services.coercion_service import CoercionService
+from app.services.customer_dialogue_service import CustomerDialogueService
 from app.services.decision_workflow_service import DecisionWorkflowService
 from app.services.investigation_service import InvestigationService
 from app.services.risk_service import RiskService
@@ -371,14 +375,28 @@ async def submit_transaction_conversation_turn(
 def get_decision_workflow_service(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     ai_client: Annotated[AIInvestigationClient, Depends(get_default_ai_client)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> DecisionWorkflowService:
     """Dependency provider wiring the automated decision workflow with a request session."""
     repository = TransactionRepository(session)
     transaction_service = TransactionService(repository)
-    risk_service = RiskService(repository, transaction_service)
+    recipient_repository = RecipientRepository(session)
+    risk_service = RiskService(repository, transaction_service, recipient_repository)
     investigation_service = InvestigationService(repository, transaction_service, ai_client)
+    coercion_service = CoercionService(repository, transaction_service, ai_client)
+    dialogue_service = CustomerDialogueService(
+        repository=repository,
+        transaction_service=transaction_service,
+        ai_client=ai_client,
+        settings=settings,
+        coercion_service=coercion_service,
+    )
     return DecisionWorkflowService(
-        repository, transaction_service, risk_service, investigation_service
+        repository=repository,
+        transaction_service=transaction_service,
+        risk_service=risk_service,
+        investigation_service=investigation_service,
+        dialogue_service=dialogue_service,
     )
 
 
@@ -420,6 +438,12 @@ def _serialize_decision(
         "contextual investigation, deterministic policy decision, and the corresponding "
         "simulated state transition. Idempotent: a repeat request returns the existing decision."
     ),
+)
+@router.post(
+    "/{transaction_id}/workflow/evaluate",
+    response_model=DecisionResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
 )
 async def evaluate_transaction(
     transaction_id: UUID,

@@ -165,7 +165,21 @@ Allowed Transition Matrix:
 
 The following components are deferred to subsequent phases:
 - `[PLANNED]` Gemini Multimodal Investigation Engine (Phase 3).
-- `[PLANNED]` Real-time WebRTC / WebSocket Voice Investigation Session (Phase 3).
+- `[IMPLEMENTED — P2-A11]` Real-time WebSocket voice session: `WS /api/v1/calls/{id}/live`
+  streams 16 kHz PCM16 mic audio to the backend, which relays to the Gemini Live API and
+  streams 24 kHz PCM16 audio + transcription back. The backend persists final transcript
+  segments (`call_transcript_segments`) and runs a parallel, advisory evidence analyzer
+  (`call_live_analyses`, versioned `live-analysis-v1`) without blocking audio. The Gemini
+  key stays server-side; the WebSocket is authenticated and transaction-scoped. Deterministic
+  policy remains the sole authority for transaction-state changes. See
+  [ADR-008](../decisions/ADR-008-dynamic-simulated-voice-and-chat.md). (Real Gemini Live
+  verified with mocks; real-provider smoke test gated behind `GEMINI_LIVE_SMOKE`.)
+- `[IMPLEMENTED — P2-A12]` Recipient Intelligence Registry & Selective Bank Calls:
+  - Persistent fictional recipient registry (`fictional_recipients`, migration 0015) seeds 20 deterministic identities (8 trusted, 5 unknown, 7 high-risk mules/collectors/impersonators).
+  - `RiskService` resolves `recipient_identifier` against server registry; authoritative DB values override client-supplied mock flags to prevent client-side parameter spoofing.
+  - Automated decision workflow selectively triggers bank-initiated outbound calls only when policy authorizes customer intervention (`REQUIRE_VERIFICATION`).
+  - Customer-scoped tokens are explicitly forbidden (`403 FORBIDDEN`) from initiating calls directly.
+  - Call creation in simulated voice mode is decoupled from text model availability when Live mode is enabled, and Gemini settings canonicalization resolves multi-directory `.env` files with sanitized credentials.
 - `[PLANNED]` Simulated WhatsApp / SMS Messaging Webhook (Phase 2).
 - `[PLANNED]` Document Inspection & Invoice Parsing Service (Phase 3).
 - `[PLANNED]` Operations Console UI (Phase 4).

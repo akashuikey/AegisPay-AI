@@ -75,6 +75,12 @@ async def test_high_risk_cannot_reach_settlement(client: AsyncClient) -> None:
     assert tx["state"] == "HELD_FOR_VERIFICATION"
     assert tx["state"] != "SETTLED_SIMULATED"
 
+    # Automated outbound verification call session was initiated for the hold
+    call_res = await client.get(f"/api/v1/transactions/{tx_id}/calls/latest")
+    assert call_res.status_code == 200
+    call_body = call_res.json()
+    assert call_body["status"] in ("RINGING", "INITIATED")
+
 
 @pytest.mark.asyncio
 async def test_ambiguous_requires_verification(client: AsyncClient) -> None:

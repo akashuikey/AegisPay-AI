@@ -38,6 +38,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:  # noqa: BLE001 - startup bootstrap must not crash the app boundary
         logger.exception("Bootstrap operator provisioning failed; continuing startup.")
 
+    # Idempotently seed the 20 fictional recipient demo records
+    from app.repositories.recipient_repository import RecipientRepository
+
+    try:
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            await RecipientRepository(session).seed_if_needed()
+    except Exception:  # noqa: BLE001
+        logger.exception("Recipient registry seeding failed; continuing startup.")
+
     yield
 
     # Shutdown: Clean up database connection pools and resources

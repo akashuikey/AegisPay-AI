@@ -313,7 +313,9 @@ async def test_ai_provider_permission_denied_maps_to_502() -> None:
 
 def test_ai_config_error_when_no_credentials() -> None:
     """Verify VertexGeminiClient raises AIConfigurationError (HTTP 503) when unconfigured."""
-    settings = Settings(GCP_PROJECT_ID="", GEMINI_API_KEY="")
+    # Pin Live off so this text-provider credential test is independent of a
+    # developer .env that enables Gemini Live (which requires credentials).
+    settings = Settings(GCP_PROJECT_ID="", GEMINI_API_KEY="", GEMINI_LIVE_ENABLED=False)
     client = VertexGeminiClient(settings)
 
     with pytest.raises(AIConfigurationError) as exc_info:
@@ -693,13 +695,21 @@ def test_provider_selection_auto_fails_without_credentials() -> None:
 
     from app.api.investigations import get_default_ai_client
 
-    # Temporarily clear GCP credentials
-    old_proj = os.environ.pop("GCP_PROJECT_ID", None)
-    old_key = os.environ.pop("GEMINI_API_KEY", None)
-    old_provider = os.environ.pop("AI_PROVIDER", None)
+    # Temporarily clear GCP credentials (override local .env)
+    old_proj = os.environ.get("GCP_PROJECT_ID")
+    old_key = os.environ.get("GEMINI_API_KEY")
+    old_provider = os.environ.get("AI_PROVIDER")
 
     try:
         os.environ["AI_PROVIDER"] = "auto"
+        os.environ["GCP_PROJECT_ID"] = ""
+        os.environ["GEMINI_API_KEY"] = ""
+        # Pin Live off: this test asserts the TEXT provider's no-credential path,
+        # independent of a developer .env that enables Gemini Live.
+        old_live = os.environ.get("GEMINI_LIVE_ENABLED")
+        os.environ["GEMINI_LIVE_ENABLED"] = "false"
+        os.environ.pop("GOOGLE_API_KEY", None)
+        os.environ.pop("AI_STUDIO_API_KEY", None)
         get_default_ai_client.cache_clear()
         client = get_default_ai_client()
         # Vertex client initialization works, but calling it without credentials
@@ -709,12 +719,22 @@ def test_provider_selection_auto_fails_without_credentials() -> None:
         assert exc_info.value.status_code == 503
     finally:
         get_default_ai_client.cache_clear()
-        if old_proj:
+        if old_live is not None:
+            os.environ["GEMINI_LIVE_ENABLED"] = old_live
+        else:
+            os.environ.pop("GEMINI_LIVE_ENABLED", None)
+        if old_proj is not None:
             os.environ["GCP_PROJECT_ID"] = old_proj
-        if old_key:
+        else:
+            os.environ.pop("GCP_PROJECT_ID", None)
+        if old_key is not None:
             os.environ["GEMINI_API_KEY"] = old_key
-        if old_provider:
+        else:
+            os.environ.pop("GEMINI_API_KEY", None)
+        if old_provider is not None:
             os.environ["AI_PROVIDER"] = old_provider
+        else:
+            os.environ.pop("AI_PROVIDER", None)
 
 
 def test_provider_selection_mock_succeeds() -> None:

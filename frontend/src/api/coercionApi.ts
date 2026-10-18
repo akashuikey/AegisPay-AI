@@ -82,6 +82,14 @@ export interface AnalyzeCoercionRequest {
   correlation_id?: string;
 }
 
+export type CoercionLifecycleStatus = 'not_started' | 'in_progress' | 'completed' | 'failed';
+
+export interface CoercionLifecycleResponse {
+  status: CoercionLifecycleStatus;
+  detail: string;
+  analysis: CoercionAnalysisResponse | null;
+}
+
 async function errorMessage(response: Response): Promise<string> {
   try {
     const data = await response.json();
@@ -107,18 +115,21 @@ export async function analyzeCoercionApi(
   return (await response.json()) as CoercionAnalysisResponse;
 }
 
-/** Retrieve the latest coercion analysis for a transaction (returns null if none exists). */
-export async function getLatestCoercionApi(
+/**
+ * Retrieve the coercion-analysis lifecycle for a transaction.
+ *
+ * The backend reports an explicit lifecycle state (not_started / in_progress /
+ * completed / failed) instead of a bare 404, so "no analysis yet" is never
+ * mistaken for "safe". A genuine 404 (missing transaction) is surfaced as an error.
+ */
+export async function getCoercionLifecycleApi(
   transactionId: string
-): Promise<CoercionAnalysisResponse | null> {
+): Promise<CoercionLifecycleResponse> {
   const url = `${config.apiBaseUrl}/api/v1/transactions/${transactionId}/coercion`;
   const response = await apiFetch(url);
-  if (response.status === 404) {
-    return null;
-  }
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }
-  return (await response.json()) as CoercionAnalysisResponse;
+  return (await response.json()) as CoercionLifecycleResponse;
 }
 

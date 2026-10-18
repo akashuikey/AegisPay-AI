@@ -96,6 +96,7 @@ class ConversationRole(StrEnum):
     OPERATOR = "operator"
     ASSISTANT = "assistant"
     SYSTEM = "system"
+    CUSTOMER = "customer"
 
 
 class ConversationStatus(StrEnum):

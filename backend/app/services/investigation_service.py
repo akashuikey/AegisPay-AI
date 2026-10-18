@@ -221,6 +221,16 @@ class InvestigationService:
             "ledger",
             "purpose",
         }
+        if tx.recipient_name:
+            rname = tx.recipient_name.strip().lower()
+            valid_refs.add(rname)
+            valid_refs.add(f"recipient name: {rname}")
+            valid_refs.add(f"recipient_name: {rname}")
+        if tx.recipient_identifier:
+            rident = tx.recipient_identifier.strip().lower()
+            valid_refs.add(rident)
+            valid_refs.add(f"recipient identifier: {rident}")
+            valid_refs.add(f"recipient_identifier: {rident}")
 
         # Customer statements
         for stmt in request.customer_statements:
@@ -296,9 +306,19 @@ class InvestigationService:
         if assessment:
             valid_refs.add(str(assessment.id).lower())
             for rule in getattr(assessment, "triggered_rules", []) or []:
-                rule_str = str(rule).strip().lower()
-                valid_refs.add(rule_str)
-                valid_refs.add(f"rule:{rule_str}")
+                if isinstance(rule, dict):
+                    rid = str(rule.get("rule_id", "")).strip().lower()
+                    rname = str(rule.get("rule_name", "")).strip().lower()
+                    if rid:
+                        valid_refs.add(rid)
+                        valid_refs.add(f"rule:{rid}")
+                    if rname:
+                        valid_refs.add(rname)
+                        valid_refs.add(f"rule:{rname}")
+                else:
+                    rule_str = str(rule).strip().lower()
+                    valid_refs.add(rule_str)
+                    valid_refs.add(f"rule:{rule_str}")
 
         # 2. Validate and filter each finding's supporting evidence references
         for finding in output.findings:

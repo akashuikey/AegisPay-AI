@@ -11,11 +11,14 @@ from sqlalchemy.orm import selectinload
 from app.core.errors import ConcurrencyConflictError
 from app.core.logging import get_logger
 from app.db.models import (
+    CallLiveAnalysisModel,
+    CallTranscriptSegmentModel,
     InvestigationConversationModel,
     InvestigationConversationTurnModel,
     ScenarioRunModel,
     TransactionAssessmentModel,
     TransactionAuditModel,
+    TransactionCallSessionModel,
     TransactionCoercionAnalysisModel,
     TransactionDecisionModel,
     TransactionInvestigationModel,
@@ -342,13 +345,14 @@ class TransactionRepository:
         return result.scalar_one_or_none()
 
     async def get_active_conversation_for_transaction(
-        self, transaction_id: UUID
+        self, transaction_id: UUID, conversation_type: str = "OPERATOR_INVESTIGATION"
     ) -> InvestigationConversationModel | None:
-        """Fetch the current active (or latest) conversation for a transaction."""
+        """Fetch active (or latest) conversation for a transaction and conversation_type."""
         stmt = (
             select(InvestigationConversationModel)
             .where(
                 InvestigationConversationModel.transaction_id == transaction_id,
+                InvestigationConversationModel.conversation_type == conversation_type,
                 InvestigationConversationModel.status == "ACTIVE",
             )
             .order_by(InvestigationConversationModel.created_at.desc())
@@ -362,7 +366,10 @@ class TransactionRepository:
 
         stmt_latest = (
             select(InvestigationConversationModel)
-            .where(InvestigationConversationModel.transaction_id == transaction_id)
+            .where(
+                InvestigationConversationModel.transaction_id == transaction_id,
+                InvestigationConversationModel.conversation_type == conversation_type,
+            )
             .order_by(InvestigationConversationModel.created_at.desc())
             .options(selectinload(InvestigationConversationModel.turns))
             .limit(1)
@@ -386,11 +393,20 @@ class TransactionRepository:
     async def create_conversation_turn(
         self, turn: InvestigationConversationTurnModel
     ) -> InvestigationConversationTurnModel:
-        """Persist a new turn for an investigation conversation."""
+        """Persist a new turn for an investigation conversation.
+
+        Rolls back on IntegrityError (e.g. a concurrent submission racing for the
+        same ``(conversation_id, turn_index)``) and re-raises so callers can map it
+        to a safe conflict response.
+        """
         self.session.add(turn)
-        await self.session.commit()
-        await self.session.refresh(turn)
-        return turn
+        try:
+            await self.session.commit()
+            await self.session.refresh(turn)
+            return turn
+        except IntegrityError:
+            await self.session.rollback()
+            raise
 
     async def update_conversation(
         self,
@@ -637,3 +653,198 @@ class TransactionRepository:
         if refreshed is None:
             raise ConcurrencyConflictError(f"Scenario run {run_id} no longer exists")
         return refreshed
+
+    async def create_call_session(
+        self, session: TransactionCallSessionModel
+    ) -> TransactionCallSessionModel:
+        """Persist a new simulated customer call session.
+
+        Rolls back on IntegrityError (duplicate idempotency key or a concurrent
+        initiation racing for the single active-session slot) and re-raises so the
+        caller can resolve the conflict safely.
+        """
+        session_id = session.id
+        self.session.add(session)
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            await self.session.rollback()
+            raise
+        refreshed = await self.get_call_session_by_id(session_id)
+        return refreshed or session
+
+    async def get_call_session_by_id(self, call_id: UUID) -> TransactionCallSessionModel | None:
+        """Fetch a call session by ID with its conversation, turns, and coercion analysis loaded."""
+        stmt = (
+            select(TransactionCallSessionModel)
+            .where(TransactionCallSessionModel.id == call_id)
+            .options(
+                selectinload(TransactionCallSessionModel.conversation).selectinload(
+                    InvestigationConversationModel.turns
+                ),
+                selectinload(TransactionCallSessionModel.coercion_analysis),
+            )
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_call_session_by_idempotency_key(
+        self, transaction_id: UUID, idempotency_key: str
+    ) -> TransactionCallSessionModel | None:
+        """Fetch a call session by transaction_id and idempotency_key."""
+        stmt = (
+            select(TransactionCallSessionModel)
+            .where(
+                TransactionCallSessionModel.transaction_id == transaction_id,
+                TransactionCallSessionModel.idempotency_key == idempotency_key,
+            )
+            .options(
+                selectinload(TransactionCallSessionModel.conversation).selectinload(
+                    InvestigationConversationModel.turns
+                )
+            )
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_active_call_session_for_transaction(
+        self, transaction_id: UUID
+    ) -> TransactionCallSessionModel | None:
+        """Fetch an active (INITIATED, RINGING, or CONNECTED) call session for a transaction."""
+        from app.domain.customer_dialogue import CallSessionStatus
+
+        active_statuses = [
+            CallSessionStatus.INITIATED.value,
+            CallSessionStatus.RINGING.value,
+            CallSessionStatus.CONNECTED.value,
+        ]
+        stmt = (
+            select(TransactionCallSessionModel)
+            .where(
+                TransactionCallSessionModel.transaction_id == transaction_id,
+                TransactionCallSessionModel.status.in_(active_statuses),
+            )
+            .order_by(TransactionCallSessionModel.created_at.desc())
+            .options(
+                selectinload(TransactionCallSessionModel.conversation).selectinload(
+                    InvestigationConversationModel.turns
+                )
+            )
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_latest_call_session_for_transaction(
+        self, transaction_id: UUID
+    ) -> TransactionCallSessionModel | None:
+        """Fetch the most recent call session for a transaction."""
+        stmt = (
+            select(TransactionCallSessionModel)
+            .where(TransactionCallSessionModel.transaction_id == transaction_id)
+            .order_by(TransactionCallSessionModel.created_at.desc())
+            .options(
+                selectinload(TransactionCallSessionModel.conversation).selectinload(
+                    InvestigationConversationModel.turns
+                ),
+                selectinload(TransactionCallSessionModel.coercion_analysis),
+            )
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_call_sessions_for_transaction(
+        self, transaction_id: UUID
+    ) -> list[TransactionCallSessionModel]:
+        """Fetch all call sessions for a transaction in chronological order."""
+        stmt = (
+            select(TransactionCallSessionModel)
+            .where(TransactionCallSessionModel.transaction_id == transaction_id)
+            .order_by(TransactionCallSessionModel.created_at.asc())
+            .options(
+                selectinload(TransactionCallSessionModel.conversation).selectinload(
+                    InvestigationConversationModel.turns
+                )
+            )
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def update_call_session(
+        self, session: TransactionCallSessionModel
+    ) -> TransactionCallSessionModel:
+        """Persist updates to an existing call session."""
+        session_id = session.id
+        session.version += 1
+        await self.session.commit()
+        refreshed = await self.get_call_session_by_id(session_id)
+        return refreshed or session
+
+    # --- P2-A11: Live voice transcript segments & incremental analysis ---
+
+    async def create_transcript_segment(
+        self, segment: CallTranscriptSegmentModel
+    ) -> CallTranscriptSegmentModel:
+        """Persist a final transcript segment.
+
+        Rolls back and re-raises on IntegrityError (duplicate ``(call_session_id, seq)``
+        from a reconnect/duplicate delivery) so the caller can skip it safely.
+        """
+        self.session.add(segment)
+        try:
+            await self.session.commit()
+            await self.session.refresh(segment)
+            return segment
+        except IntegrityError:
+            await self.session.rollback()
+            raise
+
+    async def get_max_transcript_seq(self, call_session_id: UUID) -> int | None:
+        """Return the highest persisted transcript sequence for a call session, if any."""
+        stmt = select(func.max(CallTranscriptSegmentModel.seq)).where(
+            CallTranscriptSegmentModel.call_session_id == call_session_id
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_transcript_segments(
+        self, call_session_id: UUID, after_seq: int | None = None
+    ) -> list[CallTranscriptSegmentModel]:
+        """List transcript segments for a call session ordered by sequence ascending."""
+        stmt = select(CallTranscriptSegmentModel).where(
+            CallTranscriptSegmentModel.call_session_id == call_session_id
+        )
+        if after_seq is not None:
+            stmt = stmt.where(CallTranscriptSegmentModel.seq > after_seq)
+        stmt = stmt.order_by(CallTranscriptSegmentModel.seq.asc())
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def create_live_analysis(self, analysis: CallLiveAnalysisModel) -> CallLiveAnalysisModel:
+        """Persist an incremental live evidence-analysis snapshot."""
+        self.session.add(analysis)
+        await self.session.commit()
+        await self.session.refresh(analysis)
+        return analysis
+
+    async def get_latest_live_analysis(self, call_session_id: UUID) -> CallLiveAnalysisModel | None:
+        """Fetch the most recent live analysis snapshot for a call session."""
+        stmt = (
+            select(CallLiveAnalysisModel)
+            .where(CallLiveAnalysisModel.call_session_id == call_session_id)
+            .order_by(CallLiveAnalysisModel.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_live_analyses(self, call_session_id: UUID) -> list[CallLiveAnalysisModel]:
+        """List all live analysis snapshots for a call session (chronological)."""
+        stmt = (
+            select(CallLiveAnalysisModel)
+            .where(CallLiveAnalysisModel.call_session_id == call_session_id)
+            .order_by(CallLiveAnalysisModel.created_at.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())

@@ -1,6 +1,7 @@
 """Pydantic schemas for voice duress and coercion intelligence (P2-A6)."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -144,3 +145,19 @@ class CoercionAnalysisResponse(BaseModel):
     status: str
     transcript_snippet: str
     created_at: datetime
+
+
+class CoercionAnalysisLifecycleResponse(BaseModel):
+    """Lifecycle-aware wrapper for the coercion analysis of a transaction.
+
+    Distinguishes ``not_started`` (no analysis and no active call),
+    ``in_progress`` (a call is active but analysis has not completed),
+    ``completed`` (analysis available), and ``failed`` (the analysis provider was
+    unavailable). A missing *transaction* still returns HTTP 404; a missing
+    *analysis* is reported explicitly here instead of being misrepresented as 404,
+    so the dashboard never treats "no analysis" as proof of safety.
+    """
+
+    status: Literal["not_started", "in_progress", "completed", "failed"]
+    detail: str
+    analysis: CoercionAnalysisResponse | None = None

@@ -435,11 +435,13 @@ async def test_persistence_and_retrieval(client: AsyncClient, db_session: AsyncS
     assert post_res.status_code == 201
     analysis_id = post_res.json()["id"]
 
-    # Retrieve via GET endpoint
+    # Retrieve via GET endpoint (lifecycle-aware wrapper)
     get_res = await client.get(f"/api/v1/transactions/{tx_id}/coercion")
     assert get_res.status_code == 200
-    assert get_res.json()["id"] == analysis_id
-    assert get_res.json()["transcript_snippet"] == transcript
+    body = get_res.json()
+    assert body["status"] == "completed"
+    assert body["analysis"]["id"] == analysis_id
+    assert body["analysis"]["transcript_snippet"] == transcript
 
     # Verify directly in database
     db_res = await db_session.execute(
@@ -451,6 +453,72 @@ async def test_persistence_and_retrieval(client: AsyncClient, db_session: AsyncS
     assert record is not None
     assert record.transaction_id == uuid.UUID(tx_id)
     assert record.status == "COMPLETED"
+
+
+# 13b. Lifecycle states: not_started / in_progress / failed / 404
+@pytest.mark.asyncio
+async def test_coercion_lifecycle_not_started(client: AsyncClient) -> None:
+    """A transaction with no analysis and no active call reports not_started (200)."""
+    tx_id = await _create_test_transaction(client)
+    res = await client.get(f"/api/v1/transactions/{tx_id}/coercion")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "not_started"
+    assert body["analysis"] is None
+    assert body["detail"]  # human-readable, and must NOT imply safety
+
+
+@pytest.mark.asyncio
+async def test_coercion_lifecycle_in_progress_with_active_call(client: AsyncClient) -> None:
+    """While a call session is active, coercion lifecycle reports in_progress."""
+    tx_id = await _create_test_transaction(client)
+    init = await client.post(f"/api/v1/transactions/{tx_id}/calls", json={})
+    assert init.status_code == 201
+    res = await client.get(f"/api/v1/transactions/{tx_id}/coercion")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "in_progress"
+    assert body["analysis"] is None
+
+
+@pytest.mark.asyncio
+async def test_coercion_lifecycle_failed_when_provider_unavailable(client: AsyncClient) -> None:
+    """A provider failure records UNAVAILABLE and the lifecycle reports failed."""
+    tx_id = await _create_test_transaction(client)
+
+    class FailingMock(MockGeminiClient):
+        async def generate_coercion_analysis(
+            self,
+            prompt: str,
+            system_instruction: str | None = None,
+            correlation_id: str | None = None,
+        ) -> tuple[CoercionStructuredOutput, InvestigationModelMetadata]:
+            raise AIProviderError(message="provider down", code="AI_PROVIDER_ERROR")
+
+    app = client._transport.app  # type: ignore[attr-defined]
+    app.dependency_overrides[get_default_ai_client] = lambda: FailingMock()
+    try:
+        post = await client.post(
+            f"/api/v1/transactions/{tx_id}/coercion/analyze",
+            json={"call_transcript": "A call where the provider fails to analyze."},
+        )
+        assert post.status_code == 201
+        assert post.json()["status"] == "UNAVAILABLE"
+
+        res = await client.get(f"/api/v1/transactions/{tx_id}/coercion")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["status"] == "failed"
+        assert body["analysis"] is not None
+    finally:
+        app.dependency_overrides[get_default_ai_client] = lambda: MockGeminiClient()
+
+
+@pytest.mark.asyncio
+async def test_coercion_get_404_only_for_missing_transaction(client: AsyncClient) -> None:
+    """A genuinely missing transaction still returns 404 (not a lifecycle status)."""
+    res = await client.get(f"/api/v1/transactions/{uuid.uuid4()}/coercion")
+    assert res.status_code == 404
 
 
 # 14. Matching transcript deduplication (idempotent caching)

@@ -19,6 +19,7 @@ from app.db.models import (
     TransactionInvestigationModel,
     TransactionModel,
 )
+from app.domain.customer_dialogue import DialogueChannel
 from app.domain.decision_policy import (
     CoercionSignal,
     InvestigationSignal,
@@ -35,6 +36,7 @@ from app.domain.state_machine import ActorType, TransactionState
 from app.repositories.transaction_repository import TransactionRepository
 from app.schemas.investigation import InvestigateTransactionRequest
 from app.schemas.transaction import TransitionTransactionRequest
+from app.services.customer_dialogue_service import CustomerDialogueService
 from app.services.investigation_service import InvestigationService
 from app.services.risk_service import RiskService
 from app.services.transaction_service import TransactionService
@@ -75,11 +77,13 @@ class DecisionWorkflowService:
         transaction_service: TransactionService,
         risk_service: RiskService,
         investigation_service: InvestigationService,
+        dialogue_service: CustomerDialogueService | None = None,
     ) -> None:
         self.repository = repository
         self.transaction_service = transaction_service
         self.risk_service = risk_service
         self.investigation_service = investigation_service
+        self.dialogue_service = dialogue_service
 
     async def get_latest_decision(self, transaction_id: UUID) -> TransactionDecisionModel | None:
         """Return the latest decision for a transaction (ensures the transaction exists)."""
@@ -142,8 +146,59 @@ class DecisionWorkflowService:
         )
         decision = decide(policy_input)
 
+        # A concurrent workflow or response execution may have committed a decision while
+        # the investigation was in flight. Return that decision rather than producing a conflict.
+        existing_after_investigation = await self.repository.get_latest_decision_for_transaction(
+            transaction_id
+        )
+        if existing_after_investigation is not None:
+            logger.info(
+                "Decision already persisted for tx=%s during investigation; returning %s",
+                transaction_id,
+                existing_after_investigation.id,
+            )
+            refreshed_tx = await self.transaction_service.get_transaction(transaction_id)
+            return existing_after_investigation, refreshed_tx, False
+
+        # Refresh transaction model to obtain the latest optimistic lock version
+        tx = await self.transaction_service.get_transaction(transaction_id)
+
         # 4. Execute the corresponding permitted transition and persist the decision.
-        return await self._apply_decision(tx, assessment, investigation, decision, provider_failed)
+        decision_record, updated_tx, created = await self._apply_decision(
+            tx, assessment, investigation, decision, provider_failed
+        )
+
+        # 5. Connect risk evaluation to selective call initiation:
+        # If the policy decided that customer verification intervention is warranted,
+        # initiate an authorized outbound call session automatically.
+        if (
+            created
+            and decision.action
+            in (PolicyAction.REQUIRE_VERIFICATION, PolicyAction.HOLD_FOR_INVESTIGATION)
+            and self.dialogue_service is not None
+        ):
+            try:
+                await self.dialogue_service.initiate_call_session(
+                    transaction_id=transaction_id,
+                    channel=DialogueChannel.VOICE_SIMULATED,
+                    idempotency_key=f"policy_call_{decision_record.id}",
+                    correlation_id=correlation_id,
+                )
+            except Exception as call_err:
+                logger.warning(
+                    "Automated selective call initiation skipped or failed for tx=%s: %s",
+                    transaction_id,
+                    call_err,
+                )
+            # Re-fetch models so inner call session commits do not leave expired attributes
+            refreshed_decision = await self.repository.get_latest_decision_for_transaction(
+                transaction_id
+            )
+            if refreshed_decision is not None:
+                decision_record = refreshed_decision
+            updated_tx = await self.transaction_service.get_transaction(transaction_id)
+
+        return decision_record, updated_tx, created
 
     async def _ensure_assessment(
         self,
@@ -373,6 +428,9 @@ class DecisionWorkflowService:
     ) -> tuple[TransactionDecisionModel, TransactionModel, bool]:
         target_state = _ACTION_TARGET_STATE[decision.action]
         from_state = tx.state
+        tx_id = tx.id
+        assessment_id = assessment.id
+        investigation_id = investigation.id if investigation is not None else None
 
         reason = (
             f"[policy {decision.policy_version}] action={decision.action.value}; "
@@ -380,7 +438,7 @@ class DecisionWorkflowService:
         )
         try:
             updated_tx = await self.transaction_service.transition_transaction(
-                transaction_id=tx.id,
+                transaction_id=tx_id,
                 request=TransitionTransactionRequest(
                     target_state=target_state,
                     actor_type=ActorType.POLICY_ENGINE,
@@ -391,17 +449,17 @@ class DecisionWorkflowService:
         except ConcurrencyConflictError:
             # A concurrent workflow won the race. Return its decision rather than
             # producing a conflicting outcome.
-            existing = await self.repository.get_latest_decision_for_transaction(tx.id)
+            existing = await self.repository.get_latest_decision_for_transaction(tx_id)
             if existing is not None:
-                refreshed = await self.transaction_service.get_transaction(tx.id)
+                refreshed = await self.transaction_service.get_transaction(tx_id)
                 return existing, refreshed, False
             raise
 
         decision_model = TransactionDecisionModel(
             id=uuid4(),
-            transaction_id=tx.id,
-            assessment_id=assessment.id,
-            investigation_id=investigation.id if investigation is not None else None,
+            transaction_id=tx_id,
+            assessment_id=assessment_id,
+            investigation_id=investigation_id,
             policy_version=decision.policy_version,
             action=decision.action.value,
             risk_score=decision.risk_score,
@@ -421,7 +479,7 @@ class DecisionWorkflowService:
         saved = await self.repository.create_decision(decision_model)
         logger.info(
             "Automated decision for tx=%s: action=%s %s->%s (provider_failed=%s)",
-            tx.id,
+            tx_id,
             decision.action.value,
             from_state,
             target_state.value,

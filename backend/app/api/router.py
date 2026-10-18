@@ -9,8 +9,10 @@ from app.api import (
     auth,
     coercion,
     conversations,
+    customer_dialogue,
     fraud_responses,
     investigations,
+    live_voice,
     risk,
     scenarios,
     transactions,
@@ -30,6 +32,13 @@ router.include_router(verification.router)
 
 # Fraud responses and customer interventions (individual routes declare operator vs customer auth)
 router.include_router(fraud_responses.router)
+
+# Simulated customer calls and dialogue (Option A)
+router.include_router(customer_dialogue.router)
+
+# Real-time simulated live voice over WebSocket (P2-A11). Authentication and
+# transaction scoping are enforced inside the WebSocket handler itself.
+router.include_router(live_voice.router)
 
 # Operator-only: every operations-console router requires an authenticated
 # operator. Applying the dependency at include time uniformly gates all routes

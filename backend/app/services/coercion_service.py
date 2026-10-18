@@ -54,6 +54,47 @@ class CoercionService:
         await self.transaction_service.get_transaction(transaction_id)
         return await self.repository.get_latest_coercion_analysis(transaction_id)
 
+    async def get_analysis_lifecycle(
+        self, transaction_id: UUID
+    ) -> tuple[str, str, TransactionCoercionAnalysisModel | None]:
+        """Resolve the coercion-analysis lifecycle for a transaction.
+
+        Returns ``(status, detail, analysis_or_none)`` where status is one of
+        ``not_started`` / ``in_progress`` / ``completed`` / ``failed``. Raises
+        ``NotFoundError`` only when the *transaction itself* does not exist, so a
+        missing analysis is reported explicitly rather than as a bare 404 (which the
+        dashboard must never read as proof of safety).
+        """
+        # Verifies the transaction exists (raises NotFoundError -> 404 if missing).
+        await self.transaction_service.get_transaction(transaction_id)
+        analysis = await self.repository.get_latest_coercion_analysis(transaction_id)
+
+        if analysis is not None:
+            if analysis.status == "UNAVAILABLE":
+                return (
+                    "failed",
+                    "Automated coercion analysis ran but the AI provider was "
+                    "unavailable; deterministic controls still apply.",
+                    analysis,
+                )
+            return ("completed", "Coercion analysis is available.", analysis)
+
+        # No analysis yet: distinguish an active call (in progress) from not started.
+        active_call = await self.repository.get_active_call_session_for_transaction(transaction_id)
+        if active_call is not None:
+            return (
+                "in_progress",
+                "A call is active; coercion analysis runs from the accumulated "
+                "transcript and will be available after the call.",
+                None,
+            )
+        return (
+            "not_started",
+            "No coercion analysis has been performed for this transaction yet. "
+            "This is not evidence that the transaction is safe.",
+            None,
+        )
+
     async def analyze_transaction_coercion(
         self, transaction_id: UUID, request: AnalyzeCoercionRequest
     ) -> TransactionCoercionAnalysisModel:

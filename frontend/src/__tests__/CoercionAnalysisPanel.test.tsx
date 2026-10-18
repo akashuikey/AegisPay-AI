@@ -4,9 +4,15 @@ import { CoercionAnalysisPanel } from '../components/CoercionAnalysisPanel';
 import * as coercionApi from '../api/coercionApi';
 
 vi.mock('../api/coercionApi', () => ({
-  getLatestCoercionApi: vi.fn(),
+  getCoercionLifecycleApi: vi.fn(),
   analyzeCoercionApi: vi.fn(),
 }));
+
+const notStarted = {
+  status: 'not_started' as const,
+  detail: 'No coercion analysis has been performed for this transaction yet.',
+  analysis: null,
+};
 
 describe('CoercionAnalysisPanel', () => {
   const transactionId = '00000000-0000-0000-0000-000000000001';
@@ -16,7 +22,7 @@ describe('CoercionAnalysisPanel', () => {
   });
 
   it('renders initial state and fetches existing analysis (null)', async () => {
-    vi.mocked(coercionApi.getLatestCoercionApi).mockResolvedValueOnce(null);
+    vi.mocked(coercionApi.getCoercionLifecycleApi).mockResolvedValueOnce(notStarted);
 
     render(<CoercionAnalysisPanel transactionId={transactionId} />);
 
@@ -26,7 +32,7 @@ describe('CoercionAnalysisPanel', () => {
     expect(screen.getByTestId('coercion-analyze-button')).toBeDisabled();
 
     await waitFor(() => {
-      expect(coercionApi.getLatestCoercionApi).toHaveBeenCalledWith(transactionId);
+      expect(coercionApi.getCoercionLifecycleApi).toHaveBeenCalledWith(transactionId);
     });
   });
 
@@ -72,7 +78,7 @@ describe('CoercionAnalysisPanel', () => {
       created_at: '2026-10-18T00:00:00Z',
     };
 
-    vi.mocked(coercionApi.getLatestCoercionApi).mockResolvedValueOnce(mockAnalysis);
+    vi.mocked(coercionApi.getCoercionLifecycleApi).mockResolvedValueOnce({ status: 'completed', detail: '', analysis: mockAnalysis });
 
     render(<CoercionAnalysisPanel transactionId={transactionId} />);
 
@@ -95,7 +101,7 @@ describe('CoercionAnalysisPanel', () => {
   });
 
   it('submits a transcript and updates analysis', async () => {
-    vi.mocked(coercionApi.getLatestCoercionApi).mockResolvedValueOnce(null);
+    vi.mocked(coercionApi.getCoercionLifecycleApi).mockResolvedValueOnce(notStarted);
 
     const newAnalysis: coercionApi.CoercionAnalysisResponse = {
       id: 'analysis-456',
@@ -153,7 +159,7 @@ describe('CoercionAnalysisPanel', () => {
   });
 
   it('shows error banner when analysis API call rejects', async () => {
-    vi.mocked(coercionApi.getLatestCoercionApi).mockResolvedValueOnce(null);
+    vi.mocked(coercionApi.getCoercionLifecycleApi).mockResolvedValueOnce(notStarted);
     vi.mocked(coercionApi.analyzeCoercionApi).mockRejectedValueOnce(
       new Error('Provider timeout during analysis')
     );
