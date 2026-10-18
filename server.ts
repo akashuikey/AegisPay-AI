@@ -9,14 +9,18 @@
  * - Mounts Vite middleware in development
  */
 
-import express, { Request, Response } from 'express';
+import express, { type Request, type Response } from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { GoogleGenAI, Modality } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { RECIPIENT_REGISTRY, resolveRecipient } from './src/domain/recipientRegistry';
-import { SCENARIO_CATALOG, evaluateRiskLocally } from './src/api/riskApi';
+import { RECIPIENT_REGISTRY, resolveRecipient } from './src/domain/recipientRegistry.ts';
+import { SCENARIO_CATALOG, evaluateRiskLocally } from './src/domain/riskScoring.ts';
+import { requireAuth, type AuthRequest } from './src/middleware/auth.ts';
+import { getOrCreateUser, getUsers } from './src/db/users.ts';
+import { db } from './src/db/index.ts';
+import { transactions, auditLogs } from './src/db/schema.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,6 +28,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const server = createServer(app);
 const PORT = Number(process.env.PORT || 3000);
+const paramStr = (val: string | string[] | undefined): string => (Array.isArray(val) ? val[0] : val || '');
 
 // Increase JSON body limit for audio base64 uploads
 app.use(express.json({ limit: '50mb' }));
@@ -363,18 +368,21 @@ app.post('/api/v1/scenarios/:id/runs', (req: Request, res: Response) => {
 });
 
 app.get('/api/v1/scenarios/runs/:id', (req: Request, res: Response) => {
-  const r = serverRuns.get(req.params.id) || { id: req.params.id, status: 'COMPLETED', stages: [] };
+  const id = paramStr(req.params.id);
+  const r = serverRuns.get(id) || { id, status: 'COMPLETED', stages: [] };
   res.json(r);
 });
 
 app.get('/api/v1/scenarios/runs/:id/evaluation', (req: Request, res: Response) => {
-  const ev = serverEvaluations.get(req.params.id) || { run_id: req.params.id, overall: 'MATCH', dimensions: [] };
+  const id = paramStr(req.params.id);
+  const ev = serverEvaluations.get(id) || { run_id: id, overall: 'MATCH', dimensions: [] };
   res.json(ev);
 });
 
 app.post('/api/v1/scenarios/runs/:id/evaluate', (req: Request, res: Response) => {
-  const ev = serverEvaluations.get(req.params.id) || {
-    run_id: req.params.id,
+  const id = paramStr(req.params.id);
+  const ev = serverEvaluations.get(id) || {
+    run_id: id,
     overall: 'MATCH',
     dimensions: [],
     incomplete_stages: [],
@@ -416,11 +424,12 @@ app.post('/api/v1/transactions/:id/verification', (req: Request, res: Response) 
 });
 
 app.post('/api/v1/verification/:challengeId/submit', (req: Request, res: Response) => {
-  const ch = serverChallenges.get(req.params.challengeId) || { dev_otp: '849201' };
+  const challengeId = paramStr(req.params.challengeId);
+  const ch = serverChallenges.get(challengeId) || { dev_otp: '849201' };
   const isCorrect = req.body?.otp === ch.dev_otp || req.body?.otp === '123456';
   res.json({
-    challenge_id: req.params.challengeId,
-    transaction_id: req.params.challengeId,
+    challenge_id: challengeId,
+    transaction_id: challengeId,
     result: isCorrect ? 'SUCCEEDED' : 'FAILED',
     status: isCorrect ? 'VERIFIED' : 'FAILED',
     attempts_remaining: isCorrect ? 3 : 2,
@@ -471,32 +480,37 @@ app.post('/api/v1/transactions/:id/calls', (req: Request, res: Response) => {
 });
 
 app.post('/api/v1/calls/:id/connect', (req: Request, res: Response) => {
-  const session = serverCallSessions.get(req.params.id) || { id: req.params.id, turns: [] };
+  const id = paramStr(req.params.id);
+  const session = serverCallSessions.get(id) || { id, turns: [] };
   session.status = 'CONNECTED';
   res.json(session);
 });
 
 app.post('/api/v1/calls/:id/turns', (req: Request, res: Response) => {
-  const session = serverCallSessions.get(req.params.id) || { id: req.params.id, turns: [] };
+  const id = paramStr(req.params.id);
+  const session = serverCallSessions.get(id) || { id, turns: [] };
   session.turns.push({ turn_index: session.turns.length, role: 'customer', content: req.body?.customer_message || '' });
   session.turns.push({ turn_index: session.turns.length + 1, role: 'assistant', content: 'Thank you for that context. We are analyzing the recipient security record.' });
   res.json(session);
 });
 
 app.post('/api/v1/calls/:id/complete', (req: Request, res: Response) => {
-  const session = serverCallSessions.get(req.params.id) || { id: req.params.id, turns: [] };
+  const id = paramStr(req.params.id);
+  const session = serverCallSessions.get(id) || { id, turns: [] };
   session.status = 'COMPLETED';
   res.json(session);
 });
 
 app.post('/api/v1/calls/:id/decline', (req: Request, res: Response) => {
-  const session = serverCallSessions.get(req.params.id) || { id: req.params.id, turns: [] };
+  const id = paramStr(req.params.id);
+  const session = serverCallSessions.get(id) || { id, turns: [] };
   session.status = 'DECLINED';
   res.json(session);
 });
 
 app.get('/api/v1/calls/:id', (req: Request, res: Response) => {
-  const session = serverCallSessions.get(req.params.id) || { id: req.params.id, status: 'CONNECTED', turns: [] };
+  const id = paramStr(req.params.id);
+  const session = serverCallSessions.get(id) || { id, status: 'CONNECTED', turns: [] };
   res.json(session);
 });
 
@@ -666,8 +680,9 @@ app.post(['/api/v1/investigations', '/api/v1/investigations/synthesize'], async 
 });
 
 app.get('/api/v1/investigations/:id', (req: Request, res: Response) => {
-  const inv = serverInvestigations.get(req.params.id) || {
-    id: req.params.id,
+  const id = paramStr(req.params.id);
+  const inv = serverInvestigations.get(id) || {
+    id,
     risk_sentiment: 'COERCED',
     summary: 'Simulated investigation report.',
     findings: [],
@@ -718,10 +733,11 @@ app.get('/api/v1/transactions/:id/conversations/current', (req: Request, res: Re
 });
 
 app.post(['/api/v1/transactions/:id/conversations/:convId/turns', '/api/v1/conversations/:convId/turns'], async (req: Request, res: Response) => {
-  const convId = req.params.convId;
+  const convId = paramStr(req.params.convId);
+  const txId = paramStr(req.params.id) || 'tx_default';
   const conv = serverConversations.get(convId) || {
     id: convId,
-    transaction_id: req.params.id || 'tx_default',
+    transaction_id: txId,
     status: 'ACTIVE',
     turn_count: 0,
     version: 1,
@@ -777,6 +793,78 @@ app.post(['/api/v1/transactions/:id/conversations/:convId/turns', '/api/v1/conve
   conv.updated_at = new Date().toISOString();
   serverConversations.set(convId, conv);
   res.json(conv);
+});
+
+// ---------------------------------------------------------------------------
+// Cloud SQL Database Endpoints (Drizzle ORM & Firebase Auth)
+// ---------------------------------------------------------------------------
+
+app.get('/api/users', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const allUsers = await getUsers();
+    res.json(allUsers);
+  } catch (error: any) {
+    console.error('Failed to fetch users from Cloud SQL:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch users' });
+  }
+});
+
+app.post('/api/users/sync', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const uid = req.user?.uid;
+    const email = req.user?.email || `${uid}@demo.aegispay.internal`;
+    const displayName = (req.user as any)?.name || req.body?.displayName;
+    if (!uid) {
+      return res.status(400).json({ error: 'Missing UID in decoded token' });
+    }
+    const syncedUser = await getOrCreateUser(uid, email, displayName);
+    res.json({ success: true, user: syncedUser });
+  } catch (error: any) {
+    console.error('Failed to sync user to Cloud SQL:', error);
+    res.status(500).json({ error: error.message || 'Failed to sync user' });
+  }
+});
+
+app.get('/api/db/transactions', async (_req: Request, res: Response) => {
+  try {
+    const records = await db.select().from(transactions).limit(50);
+    res.json(records);
+  } catch (error: any) {
+    console.error('Failed to fetch transactions from Cloud SQL:', error);
+    res.status(500).json({ error: error.message || 'Failed to fetch transactions' });
+  }
+});
+
+app.post('/api/db/transactions', async (req: Request, res: Response) => {
+  try {
+    const { txId, recipientName, recipientUpi, amount, purpose, checkReason, riskScore, riskLevel, verificationStatus, hasCoercion } = req.body;
+    if (!txId || !recipientName || !recipientUpi || amount === undefined) {
+      return res.status(400).json({ error: 'Missing required transaction fields' });
+    }
+    const inserted = await db.insert(transactions).values({
+      txId,
+      recipientName,
+      recipientUpi,
+      amount: Number(amount),
+      purpose: purpose || null,
+      checkReason: checkReason || null,
+      riskScore: Number(riskScore || 0),
+      riskLevel: riskLevel || 'LOW',
+      verificationStatus: verificationStatus || 'PENDING',
+      hasCoercion: Boolean(hasCoercion),
+    }).returning();
+
+    await db.insert(auditLogs).values({
+      txId,
+      decisionAction: verificationStatus || 'PENDING',
+      policyReason: checkReason || 'Transaction recorded',
+    });
+
+    res.json({ success: true, transaction: inserted[0] });
+  } catch (error: any) {
+    console.error('Failed to record transaction to Cloud SQL:', error);
+    res.status(500).json({ error: error.message || 'Failed to record transaction' });
+  }
 });
 
 // ---------------------------------------------------------------------------
