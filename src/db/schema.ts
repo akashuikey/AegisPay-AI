@@ -1,7 +1,10 @@
 import { integer, pgTable, serial, text, timestamp, real, boolean } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
-export const users = pgTable('users', {
+// NOTE: table names are prefixed `aegis_` so this lightweight Drizzle schema does
+// NOT collide with the legacy Python/Alembic backend tables (which own the
+// unprefixed `transactions`, `operators`, etc. in the same database).
+export const users = pgTable('aegis_users', {
   id: serial('id').primaryKey(),
   uid: text('uid').notNull().unique(), // Firebase Auth UID
   email: text('email').notNull(),
@@ -9,7 +12,7 @@ export const users = pgTable('users', {
   createdAt: timestamp('created_at').defaultNow(),
 });
 
-export const transactions = pgTable('transactions', {
+export const transactions = pgTable('aegis_transactions', {
   id: serial('id').primaryKey(),
   txId: text('tx_id').notNull().unique(),
   userId: integer('user_id').references(() => users.id),
@@ -25,7 +28,7 @@ export const transactions = pgTable('transactions', {
   createdAt: timestamp('created_at').defaultNow(),
 });
 
-export const auditLogs = pgTable('audit_logs', {
+export const auditLogs = pgTable('aegis_audit_logs', {
   id: serial('id').primaryKey(),
   txId: text('tx_id').notNull(),
   decisionAction: text('decision_action').notNull(),

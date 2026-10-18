@@ -34,6 +34,9 @@ import { RECIPIENT_REGISTRY, resolveRecipient, type FictionalRecipient } from '.
 import { evaluateRiskLocally, type RiskAssessmentResponse, type TransactionEvidenceInput, SCENARIO_CATALOG } from './api/riskApi';
 import { AudioTranscribeModal } from './components/AudioTranscribeModal';
 import ScenarioSimulationPanel from './components/ScenarioSimulationPanel';
+import { LiveVoiceConnection, isLiveVoiceSupported, type LiveStatus } from './api/liveVoiceClient';
+import { getToken } from './api/authApi';
+import { config } from './config';
 
 // ---------------------------------------------------------------------------
 // Types & State Definitions
@@ -106,6 +109,79 @@ export default function App() {
   ]);
   const [customerPhoneInput, setCustomerPhoneInput] = useState('');
   const [isGeminiReplying, setIsGeminiReplying] = useState(false);
+
+  // Real-time Gemini Live voice call state
+  const liveConnRef = useRef<LiveVoiceConnection | null>(null);
+  const [liveStatus, setLiveStatus] = useState<LiveStatus>('idle');
+  const [liveVoiceActive, setLiveVoiceActive] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+
+  const nowClock = () =>
+    new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  // Begin a real bidirectional Gemini Live voice call for the given transaction.
+  const startLiveCall = (txId: string) => {
+    if (liveConnRef.current) return;
+    setLiveError(null);
+    setIsMicMuted(false);
+    if (!isLiveVoiceSupported()) {
+      setLiveError('Live voice is not supported in this browser; continuing in text mode.');
+      return;
+    }
+    const conn = new LiveVoiceConnection(
+      {
+        callId: txId || `tx_${Date.now()}`,
+        token: getToken(),
+        baseUrl: config.apiBaseUrl,
+        workletUrl: '/audio/pcm-capture-worklet.js',
+      },
+      {
+        onStatus: (s) => setLiveStatus(s),
+        onTranscript: (e) => {
+          const text = (e.text || '').trim();
+          if (!text) return;
+          setConversationMessages((prev) => [
+            ...prev,
+            { role: e.speaker === 'customer' ? 'customer' : 'officer', text, time: nowClock() },
+          ]);
+        },
+        onAnalysis: (a) => {
+          if (a.summary) {
+            setConversationMessages((prev) => [
+              ...prev,
+              { role: 'officer', text: `(Action) ${a.summary}`, time: nowClock() },
+            ]);
+          }
+        },
+        onError: (m) => setLiveError(m),
+        onClosed: () => {
+          setLiveStatus('ended');
+          setLiveVoiceActive(false);
+        },
+      }
+    );
+    liveConnRef.current = conn;
+    setLiveVoiceActive(true);
+    void conn.start();
+  };
+
+  const stopLiveCall = () => {
+    const conn = liveConnRef.current;
+    liveConnRef.current = null;
+    if (conn) void conn.end('ended_by_user');
+    setLiveVoiceActive(false);
+    setLiveStatus('ended');
+  };
+
+  // Tear down any live call when the component unmounts.
+  useEffect(() => {
+    return () => {
+      const conn = liveConnRef.current;
+      liveConnRef.current = null;
+      if (conn) void conn.end('unmount');
+    };
+  }, []);
 
   // Call duration timer
   useEffect(() => {
@@ -490,19 +566,14 @@ export default function App() {
     setMobileCallActive(true);
     setMobileCallStatus('CONNECTED');
     setMobileViewMode('call');
-    if (conversationMessages.length === 0) {
-      setConversationMessages([
-        {
-          role: 'officer',
-          text: 'Hello, this is AegisPay Fraud Prevention. Can you confirm if anyone asked you to stay on this line while transferring money?',
-          time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        },
-      ]);
-    }
+    // Clear any seeded text bubbles; the live officer will greet via real audio.
+    setConversationMessages([]);
+    startLiveCall(selectedUserId);
   };
 
   // Decline incoming phone call
   const handleDeclineCall = () => {
+    stopLiveCall();
     setMobileCallActive(false);
     setMobileCallStatus('ENDED');
     setMobilePaymentHeld(true);
@@ -511,6 +582,7 @@ export default function App() {
 
   // End active phone call
   const handleEndCall = () => {
+    stopLiveCall();
     setMobileCallActive(false);
     setMobileCallStatus('ENDED');
     setMobilePaymentHeld(true);
@@ -520,6 +592,15 @@ export default function App() {
   // Send conversation message to Gemini AI inside the phone
   const handleSendPhoneMessage = async (msgText: string) => {
     if (!msgText.trim()) return;
+
+    // During a live voice call, route typed text/chips into the Gemini Live
+    // session so the officer voices a reply; the server echoes the transcript
+    // (so we don't append locally to avoid duplicate bubbles).
+    if (liveConnRef.current && (liveStatus === 'live' || liveStatus === 'connecting')) {
+      liveConnRef.current.sendText(msgText);
+      setCustomerPhoneInput('');
+      return;
+    }
 
     const userMsg = {
       role: 'customer' as const,
@@ -1371,6 +1452,8 @@ export default function App() {
                         if (!mobileCallActive) {
                           setMobileCallActive(true);
                           setMobileCallStatus('CONNECTED');
+                          setConversationMessages([]);
+                          startLiveCall(selectedUserId);
                         }
                       }}
                     >
@@ -1815,7 +1898,18 @@ export default function App() {
                                 AegisPay Security Officer
                               </div>
                               <div style={{ fontSize: 9.5, color: '#64748b' }}>
-                                Call Active · 00:{callDuration < 10 ? `0${callDuration}` : callDuration}
+                                {liveVoiceActive
+                                  ? liveStatus === 'live'
+                                    ? '🔊 Live voice · Gemini'
+                                    : liveStatus === 'requesting-mic'
+                                    ? 'Requesting microphone…'
+                                    : liveStatus === 'connecting'
+                                    ? 'Connecting live voice…'
+                                    : liveStatus === 'unavailable'
+                                    ? 'Live voice unavailable · text mode'
+                                    : 'Call Active'
+                                  : 'Call Active'}{' '}
+                                · 00:{callDuration < 10 ? `0${callDuration}` : callDuration}
                               </div>
                             </div>
                             <button
@@ -1845,14 +1939,24 @@ export default function App() {
                                 key={i}
                                 style={{
                                   width: 2,
-                                  height: `${Math.sin(i * 0.7 + callDuration) * 6 + 9}px`,
-                                  background: '#0d9488',
+                                  height: `${
+                                    liveStatus === 'live'
+                                      ? Math.abs(Math.sin(i * 0.9 + callDuration * 3)) * 11 + 4
+                                      : Math.sin(i * 0.7 + callDuration) * 6 + 9
+                                  }px`,
+                                  background: liveStatus === 'live' ? '#0d9488' : '#94a3b8',
                                   borderRadius: 1,
-                                  transition: 'height 0.2s',
+                                  transition: 'height 0.15s',
                                 }}
                               />
                             ))}
                           </div>
+
+                          {liveError && (
+                            <div style={{ fontSize: 9, color: '#b45309', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 6, padding: '4px 7px', marginBottom: 6, lineHeight: 1.35 }}>
+                              {liveError}
+                            </div>
+                          )}
 
                           {/* Dialogue Turns */}
                           <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, paddingRight: 2 }}>
@@ -1934,19 +2038,35 @@ export default function App() {
                             />
                             <button
                               type="button"
-                              onClick={() => setIsTranscribeModalOpen(true)}
+                              onClick={() => {
+                                // During a live call the mic streams continuously — this toggles mute.
+                                // Otherwise it opens the one-shot transcription modal.
+                                if (liveConnRef.current && liveVoiceActive) {
+                                  const next = !isMicMuted;
+                                  setIsMicMuted(next);
+                                  liveConnRef.current.setMuted(next);
+                                } else {
+                                  setIsTranscribeModalOpen(true);
+                                }
+                              }}
                               style={{
                                 width: 28,
                                 height: 28,
                                 borderRadius: 6,
                                 border: '1px solid #cbd5e1',
-                                background: '#f8fafc',
-                                color: '#0284c7',
+                                background: isMicMuted && liveVoiceActive ? '#fee2e2' : '#f8fafc',
+                                color: isMicMuted && liveVoiceActive ? '#ef4444' : '#0284c7',
                                 display: 'grid',
                                 placeItems: 'center',
                                 cursor: 'pointer',
                               }}
-                              title="Speak via Microphone (gemini-3.5-transcribe)"
+                              title={
+                                liveVoiceActive
+                                  ? isMicMuted
+                                    ? 'Unmute microphone'
+                                    : 'Mute microphone'
+                                  : 'Speak via Microphone'
+                              }
                             >
                               <Mic size={13} />
                             </button>

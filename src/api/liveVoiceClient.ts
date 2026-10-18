@@ -102,8 +102,25 @@ export function floatTo16kPcm(input: Float32Array, inRate: number, outRate: numb
   return out.buffer;
 }
 
+/** Decode a base64 string to an ArrayBuffer (browser `atob`; no-op in non-DOM tests). */
+export function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  if (typeof atob !== 'function') return new ArrayBuffer(0);
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
 function toWebSocketUrl(baseUrl: string, callId: string, token: string | null): string {
-  const wsBase = baseUrl.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:').replace(/\/$/, '');
+  // Same-origin when baseUrl is empty: a relative ws URL is invalid, so derive
+  // the origin from the current page.
+  const origin =
+    baseUrl && baseUrl.trim()
+      ? baseUrl.trim()
+      : typeof window !== 'undefined'
+      ? window.location.origin
+      : '';
+  const wsBase = origin.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:').replace(/\/$/, '');
   const q = token ? `?token=${encodeURIComponent(token)}` : '';
   return `${wsBase}/api/v1/calls/${encodeURIComponent(callId)}/live${q}`;
 }
@@ -230,6 +247,12 @@ export class LiveVoiceConnection {
       case 'session_started':
         this.setStatus('live');
         break;
+      case 'audio_chunk': {
+        // Server relays Gemini Live audio as base64 PCM16 (24 kHz) in a JSON frame.
+        const b64 = typeof message.audio === 'string' ? message.audio : '';
+        if (b64) this.playAudioChunk(base64ToArrayBuffer(b64));
+        break;
+      }
       case 'transcript_interim':
         this.cb.onTranscript?.({
           speaker: String(message.speaker ?? 'customer'),
@@ -306,18 +329,73 @@ export class LiveVoiceConnection {
 
   // --- playback (incremental, ordered) ----------------------------------
 
-  private playAudioChunk(_chunk: ArrayBuffer): void {
-    // Incremental playback is scheduled by the host's audio graph. In environments
-    // without real audio (tests), chunks are counted via onStatus('live'); the
-    // decode/scheduling detail lives here so barge-in can flush it.
-    this.playbackChunks.push(_chunk);
+  private playbackChunks: ArrayBuffer[] = [];
+  private playbackCursor = 0;
+  private activeSources: Array<{ stop: () => void }> = [];
+
+  /**
+   * Decode a 24 kHz PCM16 chunk and schedule it for gapless, ordered playback on
+   * the output AudioContext. In environments without a real audio graph (tests),
+   * the chunk is only counted. Barge-in (`interrupted`) stops queued audio.
+   */
+  private playAudioChunk(chunk: ArrayBuffer): void {
+    this.playbackChunks.push(chunk);
+    const ctx = this.ctx as unknown as {
+      currentTime: number;
+      destination: unknown;
+      state?: string;
+      resume?: () => Promise<void>;
+      createBuffer?: (ch: number, len: number, rate: number) => {
+        duration: number;
+        getChannelData: (c: number) => Float32Array;
+      };
+      createBufferSource?: () => {
+        buffer: unknown;
+        connect: (n: unknown) => void;
+        start: (t?: number) => void;
+        stop: () => void;
+        onended: (() => void) | null;
+      };
+    } | null;
+    if (!ctx || typeof ctx.createBuffer !== 'function' || typeof ctx.createBufferSource !== 'function') {
+      return; // no real audio graph (e.g. unit tests) — chunk counted only
+    }
+    try {
+      if (ctx.state === 'suspended') void ctx.resume?.();
+      const rate = this.opts.outputSampleRate ?? DEFAULT_OUTPUT_RATE;
+      const pcm = new Int16Array(chunk);
+      if (pcm.length === 0) return;
+      const buffer = ctx.createBuffer(1, pcm.length, rate);
+      const channel = buffer.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) channel[i] = Math.max(-1, Math.min(1, pcm[i] / 0x8000));
+      const src = ctx.createBufferSource();
+      src.buffer = buffer as unknown;
+      src.connect(ctx.destination);
+      const startAt = Math.max(ctx.currentTime, this.playbackCursor);
+      src.start(startAt);
+      this.playbackCursor = startAt + buffer.duration;
+      this.activeSources.push(src);
+      src.onended = () => {
+        this.activeSources = this.activeSources.filter((s) => s !== src);
+      };
+    } catch {
+      /* playback is best-effort */
+    }
   }
 
+  /** Stop and drop all queued/playing audio (barge-in on `interrupted`). */
   private flushPlayback(): void {
+    for (const s of this.activeSources) {
+      try {
+        s.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.activeSources = [];
+    this.playbackCursor = 0;
     this.playbackChunks = [];
   }
-
-  private playbackChunks: ArrayBuffer[] = [];
 
   /** Number of audio chunks received (exposed for diagnostics/tests). */
   get receivedAudioChunks(): number {
@@ -328,6 +406,17 @@ export class LiveVoiceConnection {
 
   setMuted(muted: boolean): void {
     this.muted = muted;
+  }
+
+  /** Send a typed customer message into the live session (chips / keyboard). */
+  sendText(text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed || !this.ws || this.ws.readyState !== 1) return;
+    try {
+      this.ws.send(JSON.stringify({ type: 'text', text: trimmed }));
+    } catch {
+      /* socket may be closing */
+    }
   }
 
   /** Gracefully end the call: signal the backend, then tear everything down. */
