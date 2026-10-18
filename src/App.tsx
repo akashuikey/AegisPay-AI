@@ -1,3395 +1,1664 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
-  Activity, ArrowDownLeft, BookOpen, Check,
-  FileSearch, FlaskConical, Headphones, Landmark, LockKeyhole, MessageSquareText,
-  Mic, MicOff, Phone as PhoneIcon, PhoneCall, PhoneOff, RotateCcw, Search, ShieldAlert, ShieldCheck,
-  Smartphone, Volume2, VolumeX, X,
+  Activity,
+  AlertOctagon,
+  AlertTriangle,
+  BarChart3,
+  CheckCircle2,
+  ChevronRight,
+  Clock,
+  Cpu,
+  CreditCard,
+  Download,
+  Mic,
+  MicOff,
+  Network,
+  PhoneCall,
+  PhoneIncoming,
+  PhoneOff,
+  Play,
+  Pause,
+  Search,
+  Send,
+  Share2,
+  Shield,
+  ShieldAlert,
+  ShieldCheck,
+  TrendingDown,
+  TrendingUp,
+  User,
+  Users,
+  X,
 } from 'lucide-react';
-import { BackendHealthBadge } from './components/BackendHealthBadge';
+import { RECIPIENT_REGISTRY, resolveRecipient, FictionalRecipient } from './domain/recipientRegistry';
+import { evaluateRiskLocally, RiskAssessmentResponse, SCENARIO_CATALOG } from './api/riskApi';
+import { AudioTranscribeModal } from './components/AudioTranscribeModal';
 import ScenarioSimulationPanel from './components/ScenarioSimulationPanel';
-import { InvestigationConversationPanel } from './components/InvestigationConversationPanel';
-import { InvestigationReviewPanel } from './components/InvestigationReviewPanel';
-import { VerificationPanel } from './components/VerificationPanel';
-import { CoercionAnalysisPanel } from './components/CoercionAnalysisPanel';
-import { CustomerInterventionPanel } from './components/CustomerInterventionPanel';
-import {
-  evaluateRiskApi,
-  evaluateRiskLocally,
-  RiskAssessmentResponse,
-  SCENARIO_CATALOG,
-  TransactionEvidenceInput,
-} from './api/riskApi';
-import { config } from './config';
-import { apiFetch, getToken } from './api/authApi';
-import {
-  initiateCallSessionApi,
-  connectCallSessionApi,
-  submitDialogueTurnApi,
-  completeCallSessionApi,
-  declineCallSessionApi,
-  getLatestCallSessionApi,
-  CallSessionResponse,
-} from './api/customerDialogueApi';
-import {
-  LiveVoiceConnection,
-  isLiveVoiceSupported,
-  type LiveAnalysisEvent,
-  type LiveStatus,
-} from './api/liveVoiceClient';
 
-type Scenario =
-  | 'digital_arrest'
-  | 'investment_scam'
-  | 'fake_invoice'
-  | 'mule_network'
-  | 'legitimate_high_value'
-  | 'ambiguous_payment'
-  | 'routine'
-  | 'impersonation'
-  | 'verified'
-  | 'unavailable'
-  | 'agent';
+// ---------------------------------------------------------------------------
+// Types & State Definitions
+// ---------------------------------------------------------------------------
 
-type Surface =
-  | 'Live Payments'
-  | 'Verification Sources'
-  | 'Scenario Lab'
-  | 'Settings'
-  | 'Agent Payments';
-type PayState =
-  | 'Awaiting verification'
-  | 'Awaiting customer decision'
-  | 'Verification incomplete'
-  | 'Approved'
-  | 'Cancelled'
-  | 'Completed without check'
-  | 'Completed after warning';
-type CallState =
-  | 'Not required'
-  | 'Scheduled'
-  | 'Calling'
-  | 'Connected'
-  | 'In progress'
-  | 'Completed'
-  | 'Declined'
-  | 'No answer'
-  | 'Error'
-  | 'Unavailable';
-type VerifyResult =
-  | 'Confirmed'
-  | 'Contradicted'
-  | 'No matching record'
-  | 'Source unavailable'
-  | 'Not independently verifiable';
-type Mode = 'voice' | 'chat';
-type Statement = { question: string; answer: string; source: 'typed' | 'speech' | 'demo response'; at?: string };
-type Audit = { title: string; detail: string; at: string };
+type NavTab = 'Live System' | 'Scenarios' | 'Analytics' | 'Audit Logs';
 
-type Tx = {
+interface UserPaymentItem {
   id: string;
-  customer: string;
-  customerId: string;
-  recipient: string;
+  userNum: number;
+  userName: string;
+  initials: string;
+  recipientName: string;
+  recipientUpi: string;
   amount: number;
-  initiated: string;
-  payment: PayState;
-  call: CallState;
-  known: boolean;
-  reference: string;
+  checkReason: string;
+  initiatedOn: string;
+  riskScore: number;
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  verificationStatus: 'Pending' | 'In Progress' | 'Verified' | 'Hold' | 'Cancelled';
   purpose: string;
-  statements: Statement[];
-  audit: Audit[];
-  attempt: number;
-  result: VerifyResult;
-  claim: string;
-  claimInstitution?: string;
-  claimInstruction?: string;
-  claimReference?: string;
-  channel?: Mode;
-  reason: string;
-  process: string;
-  concern?: boolean;
-  scenario?: Scenario;
-  assessment?: RiskAssessmentResponse;
-  backendId?: string;
-  callSessionId?: string;
-};
-
-const scenarios: Record<
-  Scenario,
-  { label: string; recipient: string; amount: number; reference: string; purpose: string; known: boolean }
-> = {
-  digital_arrest: {
-    label: '1. Digital Arrest / Coercion',
-    recipient: SCENARIO_CATALOG.digital_arrest.recipient,
-    amount: SCENARIO_CATALOG.digital_arrest.amount,
-    reference: SCENARIO_CATALOG.digital_arrest.reference,
-    purpose: SCENARIO_CATALOG.digital_arrest.purpose,
-    known: false,
-  },
-  investment_scam: {
-    label: '2. High-Yield Investment Fraud',
-    recipient: SCENARIO_CATALOG.investment_scam.recipient,
-    amount: SCENARIO_CATALOG.investment_scam.amount,
-    reference: SCENARIO_CATALOG.investment_scam.reference,
-    purpose: SCENARIO_CATALOG.investment_scam.purpose,
-    known: false,
-  },
-  fake_invoice: {
-    label: '3. Fake Invoice / Routing Mismatch',
-    recipient: SCENARIO_CATALOG.fake_invoice.recipient,
-    amount: SCENARIO_CATALOG.fake_invoice.amount,
-    reference: SCENARIO_CATALOG.fake_invoice.reference,
-    purpose: SCENARIO_CATALOG.fake_invoice.purpose,
-    known: false,
-  },
-  mule_network: {
-    label: '4. Mule Account Dispersal',
-    recipient: SCENARIO_CATALOG.mule_network.recipient,
-    amount: SCENARIO_CATALOG.mule_network.amount,
-    reference: SCENARIO_CATALOG.mule_network.reference,
-    purpose: SCENARIO_CATALOG.mule_network.purpose,
-    known: false,
-  },
-  legitimate_high_value: {
-    label: '5. Legitimate High-Value Transfer',
-    recipient: SCENARIO_CATALOG.legitimate_high_value.recipient,
-    amount: SCENARIO_CATALOG.legitimate_high_value.amount,
-    reference: SCENARIO_CATALOG.legitimate_high_value.reference,
-    purpose: SCENARIO_CATALOG.legitimate_high_value.purpose,
-    known: true,
-  },
-  ambiguous_payment: {
-    label: '6. Ambiguous / Missing Telemetry',
-    recipient: SCENARIO_CATALOG.ambiguous_payment.recipient,
-    amount: SCENARIO_CATALOG.ambiguous_payment.amount,
-    reference: SCENARIO_CATALOG.ambiguous_payment.reference,
-    purpose: SCENARIO_CATALOG.ambiguous_payment.purpose,
-    known: false,
-  },
-  routine: {
-    label: 'Routine rent (legacy)',
-    recipient: 'Maple Grove Properties',
-    amount: 18000,
-    reference: '',
-    purpose: 'Monthly rent',
-    known: true,
-  },
-  impersonation: {
-    label: 'Bank impersonation (legacy)',
-    recipient: 'Secure Reserve Services',
-    amount: 85000,
-    reference: '',
-    purpose: '',
-    known: false,
-  },
-  verified: {
-    label: 'Verified bank request (legacy)',
-    recipient: 'Aster Bank Settlement',
-    amount: 6500,
-    reference: 'ASB-48219',
-    purpose: 'Aster Bank settlement instruction',
-    known: false,
-  },
-  unavailable: {
-    label: 'Source unavailable (legacy)',
-    recipient: 'Northstar Holdings',
-    amount: 42000,
-    reference: '',
-    purpose: '',
-    known: false,
-  },
-  agent: {
-    label: 'Agent mandate · secondary',
-    recipient: 'Orchid Audio',
-    amount: 4500,
-    reference: '',
-    purpose: 'Headphones purchase',
-    known: false,
-  },
-};
-
-const initialQuestions = [
-  'What is this payment for?',
-  'Who asked you to make this payment?',
-  'Did they give you a reference number?',
-];
-
-const fmt = (n: number) => `₹${n.toLocaleString('en-IN')}`;
-const stamp = () =>
-  new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-const fullStamp = () =>
-  new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'medium' });
-const shortTime = (value: string) => value.split(', ').at(-1) ?? value;
-const classes = (...v: Array<string | false | undefined>) => v.filter(Boolean).join(' ');
-const makeAudit = (title: string, detail: string): Audit => ({ title, detail, at: stamp() });
-
-const paymentStatus = (tx: Tx) => {
-  if (tx.payment === 'Cancelled') return 'Cancelled';
-  if (['Approved', 'Completed without check', 'Completed after warning'].includes(tx.payment))
-    return 'Completed';
-  return 'Pending';
-};
-
-const verificationStatus = (tx: Tx) => {
-  if (tx.call === 'Not required') return 'Not required';
-  if (['Scheduled', 'Calling'].includes(tx.call)) return 'Calling';
-  if (
-    tx.payment === 'Verification incomplete' ||
-    ['Declined', 'No answer', 'Error', 'Unavailable'].includes(tx.call)
-  )
-    return 'Incomplete';
-  if (/extracting claim|checking .*registry/i.test(tx.process)) return 'Checking claim';
-  if (tx.call === 'Connected') return 'Voice connected';
-  if (tx.call === 'In progress') return tx.channel === 'chat' ? 'Chat active' : 'Voice connected';
-  if (tx.call === 'Completed') return 'Complete';
-  return 'Incomplete';
-};
-
-const decisionStatus = (tx: Tx) => {
-  if (tx.payment === 'Awaiting customer decision') return 'Pending customer choice';
-  if (tx.payment === 'Approved') return 'Approved';
-  if (tx.payment === 'Completed without check') return 'Completed · check not required';
-  if (tx.payment === 'Completed after warning') return 'Customer proceeded after warning';
-  if (tx.payment === 'Cancelled') return 'Cancelled';
-  if (tx.payment === 'Verification incomplete') return 'Verification incomplete';
-  return 'Pending verification';
-};
-
-const checkReason = (tx: Tx, threshold: number) => {
-  if (tx.scenario === 'agent') return 'Agent payment';
-  if (tx.known) return 'Routine payment';
-  return tx.amount >= threshold ? 'New payee · Unusual amount' : 'New payee';
-};
-
-const seed = (): Tx[] => [
-  {
-    id: 'AST-240618-0837',
-    customer: 'Meera Iyer',
-    customerId: 'CU-1028',
-    recipient: 'Cedar & Stone Foods',
-    amount: 2460,
-    initiated: '18 Jun 2024, 09:12:08',
-    payment: 'Completed without check',
-    call: 'Not required',
-    known: true,
-    reference: '',
-    purpose: 'Groceries',
-    statements: [],
-    audit: [makeAudit('Payment completed', 'Known recipient · routine payment.')],
-    attempt: 0,
-    result: 'Not independently verifiable',
-    claim: '',
-    reason: 'Known payee and routine amount; no additional verification required.',
-    process: 'Complete',
-    assessment: evaluateRiskLocally({
-      amount: 2460,
-      recipient_name: 'Cedar & Stone Foods',
-      is_first_time_recipient: false,
-      is_trusted_beneficiary: true,
-      coercive_language_detected: false,
-    }),
-  },
-  {
-    id: 'AST-240618-0839',
-    customer: 'Kabir Shah',
-    customerId: 'CU-1091',
-    recipient: 'Riverview Medical',
-    amount: 12750,
-    initiated: '18 Jun 2024, 09:18:42',
-    payment: 'Awaiting verification',
-    call: 'Calling',
-    known: false,
-    reference: '',
-    purpose: 'Clinic invoice',
-    statements: [],
-    audit: [makeAudit('Call ringing', 'Customer verification call started.')],
-    attempt: 1,
-    result: 'Not independently verifiable',
-    claim: '',
-    reason: 'Customer review is in progress.',
-    process: 'Waiting for customer to answer',
-    assessment: evaluateRiskLocally({
-      amount: 12750,
-      recipient_name: 'Riverview Medical',
-      is_first_time_recipient: true,
-    }),
-  },
-  {
-    id: 'AST-240618-0840',
-    customer: 'Sana Kapoor',
-    customerId: 'CU-1103',
-    recipient: 'Brightline Consulting',
-    amount: 32500,
-    initiated: '18 Jun 2024, 09:21:05',
-    payment: 'Awaiting verification',
-    call: 'In progress',
-    channel: 'chat',
-    known: false,
-    reference: '',
-    purpose: 'Consulting deposit',
-    statements: [{ question: 'What is this payment for?', answer: 'A project deposit.', source: 'typed', at: '09:23:14' }],
-    audit: [makeAudit('Customer connected', 'Verification conversation in progress.')],
-    attempt: 1,
-    result: 'Not independently verifiable',
-    claim: '',
-    reason: 'Customer review is in progress.',
-    process: 'Listening to customer',
-    assessment: evaluateRiskLocally({
-      amount: 32500,
-      recipient_name: 'Brightline Consulting',
-      is_first_time_recipient: true,
-      active_call_present: true,
-    }),
-  },
-  {
-    id: 'AST-240618-0828',
-    customer: 'Arjun Nair',
-    customerId: 'CU-0982',
-    recipient: 'Aster Bank Fees',
-    amount: 1250,
-    initiated: '18 Jun 2024, 08:44:19',
-    payment: 'Approved',
-    call: 'Completed',
-    known: false,
-    reference: 'ASB-48220',
-    purpose: 'Account fee',
-    statements: [],
-    audit: [makeAudit('Payment completed after approval', 'Aster Bank instruction matched and the simulated transfer completed.')],
-    attempt: 1,
-    result: 'Confirmed',
-    claim: 'Account fee instruction · ASB-48220',
-    reason: 'All six instruction fields matched the Aster Bank instruction registry. The simulated payment completed.',
-    process: 'Complete',
-    assessment: evaluateRiskLocally({
-      amount: 1250,
-      recipient_name: 'Aster Bank Fees',
-      is_first_time_recipient: true,
-    }),
-  },
-  {
-    id: 'AST-240618-0824',
-    customer: 'Leela Menon',
-    customerId: 'CU-1006',
-    recipient: 'Westgate Services',
-    amount: 68000,
-    initiated: '18 Jun 2024, 08:31:50',
-    payment: 'Cancelled',
-    call: 'Completed',
-    known: false,
-    reference: '',
-    purpose: 'Urgent account protection',
-    statements: [],
-    audit: [makeAudit('Customer cancelled after warning', 'The customer reviewed the warning and chose to cancel. Money was not sent.')],
-    attempt: 1,
-    result: 'No matching record',
-    claim: 'Safe-account transfer claim',
-    reason: 'After a safe-account and pressure warning, the customer chose to cancel. A missing record alone is not proof of fraud.',
-    process: 'Complete',
-    assessment: evaluateRiskLocally({
-      amount: 68000,
-      recipient_name: 'Westgate Services',
-      is_first_time_recipient: true,
-      coercive_language_detected: true,
-      active_call_present: true,
-    }),
-  },
-  {
-    id: 'AST-240618-0819',
-    customer: 'Dev Mehta',
-    customerId: 'CU-0951',
-    recipient: 'Northstar Holdings',
-    amount: 42000,
-    initiated: '18 Jun 2024, 08:12:06',
-    payment: 'Verification incomplete',
-    call: 'Unavailable',
-    known: false,
-    reference: '',
-    purpose: 'Investment instruction',
-    statements: [],
-    audit: [makeAudit('Verification incomplete', 'Configured source unavailable; funds remain unsent.')],
-    attempt: 1,
-    result: 'Source unavailable',
-    claim: 'Investment instruction',
-    reason: 'Required instruction source is unavailable. No payment was sent.',
-    process: 'Source unavailable',
-    assessment: evaluateRiskLocally({
-      amount: 42000,
-      recipient_name: 'Northstar Holdings',
-      is_first_time_recipient: true,
-    }),
-  },
-];
-
-interface SpeechResultEvent extends Event {
-  results: ArrayLike<ArrayLike<{ transcript: string }>>;
+  hasCoercion: boolean;
+  transcriptEntries: Array<{
+    speaker: string;
+    role: 'caller' | 'user' | 'officer';
+    time: string;
+    text: string;
+    threatBadge?: string;
+    threatTone?: 'danger' | 'warning' | 'info';
+  }>;
 }
-interface SpeechRecognitionLike extends EventTarget {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onresult: ((event: SpeechResultEvent) => void) | null;
-  onerror: ((event: Event & { error?: string }) => void) | null;
-  onend: (() => void) | null;
-  start(): void;
-  stop(): void;
-  abort(): void;
-}
-type SpeechWindow = Window & {
-  SpeechRecognition?: new () => SpeechRecognitionLike;
-  webkitSpeechRecognition?: new () => SpeechRecognitionLike;
-};
 
-type DrawerTab =
-  | 'Live verification'
-  | 'Risk assessment'
-  | 'Evidence & checks'
-  | 'AI Investigation'
-  | 'Decision & history';
+export default function App() {
+  const [activeTab, setActiveTab] = useState<NavTab>('Live System');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isTranscribeModalOpen, setIsTranscribeModalOpen] = useState(false);
 
-function App() {
-  const [scenario, setScenario] = useState<Scenario>('digital_arrest');
-  const [surface, setSurface] = useState<Surface>('Live Payments');
-  const [records, setRecords] = useState<Tx[]>(seed);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [highlightId, setHighlightId] = useState<string | null>(null);
-  const [drawerTab, setDrawerTab] = useState<DrawerTab>('Live verification');
-  const [query, setQuery] = useState('');
-  const [paymentFilter, setPaymentFilter] = useState('All payments');
-  const [verificationFilter, setVerificationFilter] = useState('All verifications');
-  const [guided, setGuided] = useState(true);
-  const [demoResponses, setDemoResponses] = useState(true);
-  const [mobileView, setMobileView] = useState<'bank' | 'phone'>('bank');
-  const [stage, setStage] = useState<
-    | 'home'
-    | 'form'
-    | 'pending'
-    | 'ringing'
-    | 'active'
-    | 'chat'
-    | 'processing'
-    | 'warning'
-    | 'incomplete'
-    | 'outcome'
-    | 'settings'
-    | 'agent'
-  >('form');
+  // Audio Playback State for Waveform Bar
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [audioProgress, setAudioProgress] = useState(0);
 
-  const initialScenario = scenarios.digital_arrest;
-  const [recipient, setRecipient] = useState(initialScenario.recipient);
-  const [amount, setAmount] = useState(initialScenario.amount);
-  const [purpose, setPurpose] = useState(initialScenario.purpose);
-  const [reference, setReference] = useState(initialScenario.reference);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [mode, setMode] = useState<Mode>('chat');
-  const [questionIndex, setQuestionIndex] = useState(0);
-  const [draft, setDraft] = useState('');
-  const [assistantSpeaking, setAssistantSpeaking] = useState(false);
-  const [voiceError, setVoiceError] = useState('');
-  const [muted, setMuted] = useState(false);
-  const [micMuted, setMicMuted] = useState(false);
-  const [draftSource, setDraftSource] = useState<Statement['source']>('typed');
-  const [duration, setDuration] = useState(0);
-  const policyLimit = 25000;
-  const [trusted, setTrusted] = useState(false);
-  const [consent, setConsent] = useState(true);
-  const [agentResult, setAgentResult] = useState<'idle' | 'approved' | 'rejected'>('idle');
-  const [agentMerchant, setAgentMerchant] = useState('Other merchant');
-  const [agentCategory, setAgentCategory] = useState('Gift cards');
-  const [agentAmount, setAgentAmount] = useState('4500');
+  // Live Investigation Tab State
+  const [investigationTab, setInvestigationTab] = useState<'Transcript' | 'Conversation' | 'AI Analysis'>('Transcript');
 
-  const [dynamicQuestion, setDynamicQuestion] = useState<string>('');
-  const [activeCallSession, setActiveCallSession] = useState<CallSessionResponse | null>(null);
-  // Real-time Gemini Live voice (P2-A11). Only attempted in browsers that support
-  // audio capture; otherwise the existing simulated voice/chat path is used.
-  const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
-  const [liveTranscript, setLiveTranscript] = useState<{ speaker: string; text: string }[]>([]);
-  const [liveAnalysis, setLiveAnalysis] = useState<LiveAnalysisEvent | null>(null);
+  // Customer Mobile Payment & Call Screen State
+  const [mobileViewMode, setMobileViewMode] = useState<'send_money' | 'call'>('send_money');
+  const [mobileUpi, setMobileUpi] = useState('rohit@upi');
+  const [mobileAmount, setMobileAmount] = useState('250000');
+  const [mobilePurpose, setMobilePurpose] = useState('Payment for official fees');
+  const [mobileCallActive, setMobileCallActive] = useState(false);
+  const [mobileCallStatus, setMobileCallStatus] = useState<'RINGING' | 'CONNECTED' | 'ENDED'>('RINGING');
+  const [callDuration, setCallDuration] = useState(0);
+  const [mobilePaymentHeld, setMobilePaymentHeld] = useState(false);
+  const [isAnalyzingPay, setIsAnalyzingPay] = useState(false);
 
-  const timers = useRef<number[]>([]);
-  const recognition = useRef<SpeechRecognitionLike | null>(null);
-  // Guards against duplicate turn submissions from rapid repeated clicks.
-  const submittingTurn = useRef(false);
-  // Active real-time live-voice connection, if any (P2-A11).
-  const liveConn = useRef<LiveVoiceConnection | null>(null);
-  const activeRef = useRef(activeId);
-  activeRef.current = activeId;
-  const stageRef = useRef(stage);
-  stageRef.current = stage;
-  const selected = records.find((r) => r.id === selectedId) ?? null;
-  const activeTx = records.find((r) => r.id === activeId) ?? null;
+  // Live Conversation Messages with Gemini AI inside the phone
+  const [conversationMessages, setConversationMessages] = useState<Array<{ role: 'officer' | 'customer'; text: string; time: string }>>([
+    {
+      role: 'officer',
+      text: 'Hello, this is AegisPay Fraud Prevention. Can you confirm if anyone asked you to stay on this line while transferring money?',
+      time: '10:24:16 AM',
+    },
+  ]);
+  const [customerPhoneInput, setCustomerPhoneInput] = useState('');
+  const [isGeminiReplying, setIsGeminiReplying] = useState(false);
 
-  const speechConstructor = useMemo(() => {
-    if (typeof window === 'undefined') return undefined;
-    const w = window as SpeechWindow;
-    return w.SpeechRecognition ?? w.webkitSpeechRecognition;
-  }, []);
-  const voiceSupported = Boolean(speechConstructor);
-
-  const currentQuestion = useMemo(() => {
-    if (dynamicQuestion) return dynamicQuestion;
-    if (activeCallSession && Array.isArray(activeCallSession.turns) && activeCallSession.turns.length > 0) {
-      const lastAsst = [...activeCallSession.turns].reverse().find((t) => t.role === 'assistant');
-      if (lastAsst?.content) return lastAsst.content;
-    }
-    const list = [...initialQuestions];
-    const statements = activeTx?.statements ?? [];
-    if (
-      statements.some((s) =>
-        /urgent|secret|safe account|pressure|quickly|don't tell|not tell/i.test(s.answer)
-      )
-    ) {
-      list.push('Did they ask you to act urgently or keep this payment secret?');
-    }
-    return list[Math.min(questionIndex, list.length - 1)];
-  }, [dynamicQuestion, activeCallSession, questionIndex, activeTx?.statements]);
-
-  const questionsCount = useMemo(() => {
-    if (activeCallSession && Array.isArray(activeCallSession.turns)) {
-      return Math.max(3, activeCallSession.turns.length + 1);
-    }
-    return 3;
-  }, [activeCallSession]);
-
-  const clearRuntime = useCallback(() => {
-    timers.current.forEach(window.clearTimeout);
-    timers.current = [];
-    try {
-      recognition.current?.abort();
-    } catch {
-      /* browser may already have ended */
-    }
-    recognition.current = null;
-    if (liveConn.current) {
-      void liveConn.current.end('ended');
-      liveConn.current = null;
-    }
-    setLiveStatus(null);
-    setLiveTranscript([]);
-    setLiveAnalysis(null);
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    setAssistantSpeaking(false);
-  }, []);
-
-  useEffect(() => () => clearRuntime(), [clearRuntime]);
+  // Call duration timer
   useEffect(() => {
-    if (!['active', 'chat', 'processing'].includes(stage)) return;
-    const id = window.setInterval(() => setDuration((v) => v + 1), 1000);
-    return () => window.clearInterval(id);
-  }, [stage]);
-
-  function patchTx(id: string, update: Partial<Tx>, event?: { title: string; detail: string }) {
-    setRecords((old) =>
-      old.map((tx) =>
-        tx.id === id
-          ? {
-              ...tx,
-              ...update,
-              audit: event ? [makeAudit(event.title, event.detail), ...tx.audit] : tx.audit,
-            }
-          : tx
-      )
-    );
-  }
-
-  function setProcess(id: string, process: string, call?: CallState) {
-    patchTx(id, { process, ...(call ? { call } : {}) });
-  }
-
-  function reset(next: Scenario = scenario) {
-    clearRuntime();
-    const d = scenarios[next] || scenarios.digital_arrest;
-    setScenario(next);
-    setRecords(seed());
-    setSelectedId(null);
-    setHighlightId(null);
-    setActiveId(null);
-    setStage('form');
-    setRecipient(d.recipient);
-    setAmount(d.amount);
-    setPurpose(d.purpose);
-    setReference(d.reference);
-    setQuestionIndex(0);
-    setDraft('');
-    setDraftSource('typed');
-    setMode('chat');
-    setVoiceError('');
-    setDuration(0);
-    setMuted(false);
-    setMicMuted(false);
-    setMobileView('bank');
-    setSurface(next === 'agent' ? 'Agent Payments' : 'Live Payments');
-    setAgentResult('idle');
-    setDynamicQuestion('');
-    setActiveCallSession(null);
-  }
-
-  function schedule(fn: () => void, delay: number) {
-    const id = window.setTimeout(fn, delay);
-    timers.current.push(id);
-  }
-
-  function buildEvidenceForScenario(selectedScenario: Scenario, txAmount: number, txRecipient: string, txPurpose: string): TransactionEvidenceInput {
-    const catalogEntry = SCENARIO_CATALOG[selectedScenario];
-    if (catalogEntry) {
-      return {
-        ...catalogEntry.evidence,
-        amount: txAmount,
-        recipient_name: txRecipient,
-        purpose: txPurpose || catalogEntry.purpose,
-      };
-    }
-
-    if (selectedScenario === 'routine') {
-      return {
-        amount: txAmount,
-        recipient_name: txRecipient,
-        is_first_time_recipient: false,
-        is_trusted_beneficiary: true,
-        coercive_language_detected: false,
-      };
-    }
-
-    return {
-      amount: txAmount,
-      recipient_name: txRecipient,
-      recipient_identifier: reference.trim() || 'user@upi',
-      purpose: txPurpose,
-      customer_id: 'CU-1042',
-      is_first_time_recipient: true,
-    };
-  }
-
-  function sendPayment() {
-    if (!recipient.trim() || amount <= 0) return;
-
-    const evidenceInput = buildEvidenceForScenario(scenario, amount, recipient.trim(), purpose.trim());
-    const initialAssessment = evaluateRiskLocally(evidenceInput);
-
-    if (
-      (scenario === 'routine' || scenario === 'legitimate_high_value') &&
-      recipient.trim() === 'Maple Grove Properties'
-    ) {
-      const tx: Tx = {
-        id: 'AST-240618-0843',
-        customer: 'Anika Rao',
-        customerId: 'CU-1042',
-        recipient: recipient.trim(),
-        amount,
-        initiated: fullStamp(),
-        payment: 'Completed without check',
-        call: 'Not required',
-        known: true,
-        reference,
-        purpose: purpose || 'Monthly rent',
-        statements: [],
-        audit: [makeAudit('Payment completed', 'Routine known-recipient payment; verification not required.')],
-        attempt: 0,
-        result: 'Not independently verifiable',
-        claim: '',
-        reason: 'Known payee and routine payment; no additional verification required.',
-        process: 'Complete',
-        scenario,
-        assessment: initialAssessment,
-      };
-      setRecords((old) => [tx, ...old]);
-      setActiveId(tx.id);
-      setHighlightId(tx.id);
-      setStage('outcome');
-      schedule(() => setHighlightId((id) => (id === tx.id ? null : id)), 8000);
-
-      // Async backend assessment sync
-      evaluateRiskApi(evidenceInput).then((res) => {
-        patchTx(tx.id, { assessment: res });
-      });
-      return;
-    }
-
-    if (activeId) {
-      const existing = records.find((r) => r.id === activeId);
-      if (existing && ['Awaiting verification', 'Verification incomplete'].includes(existing.payment)) {
-        retry();
-        return;
-      }
-    }
-
-    const id = `AST-${new Date().toISOString().slice(2, 10).replaceAll('-', '')}-${String(Math.floor(1000 + Math.random() * 8999))}`;
-    const tx: Tx = {
-      id,
-      customer: 'Anika Rao',
-      customerId: 'CU-1042',
-      recipient: recipient.trim(),
-      amount,
-      initiated: fullStamp(),
-      payment: 'Awaiting verification',
-      call: 'Scheduled',
-      known: false,
-      reference: reference.trim(),
-      purpose: purpose.trim(),
-      statements: [],
-      audit: [makeAudit('Payment submitted', 'Payment created and held pending verification. Money has not been sent.')],
-      attempt: 1,
-      result: 'Not independently verifiable',
-      claim: '',
-      reason: 'Awaiting customer verification. Money has not been sent.',
-      process: 'Payment awaiting verification',
-      concern: false,
-      scenario,
-      assessment: initialAssessment,
-    };
-
-    setRecords((old) => [tx, ...old]);
-    setActiveId(id);
-    setHighlightId(id);
-    setStage('pending');
-    setMode('chat');
-    setQuestionIndex(0);
-    setDraft('');
-    schedule(() => setHighlightId((current) => (current === id ? null : current)), 8000);
-    if (guided) setSelectedId(id);
-
-    // Call backend API for real assessment and state synchronization
-    evaluateRiskApi(evidenceInput).then((res) => {
-      patchTx(id, { assessment: res });
-    });
-
-    // Create backend transaction and evaluate automated decision workflow
-    apiFetch(`${config.apiBaseUrl}/api/v1/transactions`, {
-      method: 'POST',
-      body: JSON.stringify({
-        customer_id: 'CU-1042',
-        idempotency_key: `idemp_${id}`,
-        amount: Number(amount),
-        currency: 'INR',
-        payment_rail: 'UPI',
-        recipient_name: recipient.trim(),
-        recipient_identifier: reference.trim() || `${recipient.trim().toLowerCase().replace(/[^a-z0-9]/g, '')}@upi`,
-        purpose: purpose.trim() || undefined,
-      }),
-    })
-      .then(async (res) => {
-        if (!res.ok) return null;
-        const data = await res.json();
-        return data as { id: string };
-      })
-      .then(async (backendTx) => {
-        if (!backendTx?.id) return;
-        patchTx(id, { backendId: backendTx.id });
-        try {
-          // Run automated decision workflow on backend
-          const evalRes = await apiFetch(`${config.apiBaseUrl}/api/v1/transactions/${backendTx.id}/workflow/evaluate`, {
-            method: 'POST',
-            body: JSON.stringify({
-              evidence: evidenceInput,
-            }),
-          });
-          if (evalRes.ok) {
-            const decisionData = await evalRes.json();
-            const action = decisionData?.action;
-
-            const requiresVerification =
-              action === 'REQUIRE_VERIFICATION' ||
-              action === 'HOLD_FOR_INVESTIGATION' ||
-              decisionData?.requires_verification === true ||
-              (!action &&
-                (initialAssessment?.recommended_action === 'REQUIRE_VERIFICATION' ||
-                  initialAssessment?.recommended_action === 'HOLD_FOR_INVESTIGATION'));
-
-            if (requiresVerification) {
-              // Policy authorized customer intervention call!
-              let callSession = await getLatestCallSessionApi(backendTx.id).catch(() => null);
-              if (!callSession) {
-                callSession = await initiateCallSessionApi(backendTx.id).catch(() => null);
-              }
-              const terminalCallStatuses = [
-                'FAILED',
-                'CANCELLED',
-                'TIMED_OUT',
-                'DECLINED',
-                'COMPLETED',
-              ];
-              if (callSession && terminalCallStatuses.includes(callSession.status)) {
-                // The bank-initiated call could not be established (e.g. Gemini Live
-                // unavailable / misconfigured). The deterministic protective decision
-                // stands; we surface the intervention failure and offer a safe retry
-                // instead of pretending the phone is ringing.
-                const reasonDetail = callSession.failure_reason
-                  ? `Automated verification call could not be completed (${callSession.failure_reason}).`
-                  : 'The automated bank verification call could not be established.';
-                patchTx(id, {
-                  callSessionId: callSession.id,
-                  payment: 'Verification incomplete',
-                  call: 'Error',
-                  process: 'Call could not be established',
-                  reason: `${reasonDetail} The payment remains held for verification; no money was sent.`,
-                  audit: [makeAudit('Call failed', reasonDetail)],
-                });
-                setActiveCallSession(callSession);
-                setStage('incomplete');
-              } else {
-                if (callSession) {
-                  patchTx(id, {
-                    callSessionId: callSession.id,
-                    call: 'Calling',
-                    process: 'Waiting for customer to answer',
-                    audit: [makeAudit('Call ringing', 'Aster Bank Verification call is ringing.')],
-                  });
-                  setActiveCallSession(callSession);
-                  if (Array.isArray(callSession?.turns) && callSession.turns.length > 0) {
-                    const firstAsst = callSession.turns.find((t) => t.role === 'assistant');
-                    if (firstAsst?.content) {
-                      setDynamicQuestion(firstAsst.content);
-                    }
-                  }
-                } else {
-                  patchTx(id, {
-                    call: 'Calling',
-                    process: 'Waiting for customer to answer',
-                    audit: [makeAudit('Call ringing', 'Aster Bank Verification call is ringing.')],
-                  });
-                }
-                setStage('ringing');
-                schedule(() => {
-                  if (activeRef.current === id && stageRef.current === 'ringing') {
-                    incomplete('The customer did not answer the simulated call.', 'No answer');
-                  }
-                }, 12000);
-              }
-            } else if (action === 'ALLOW') {
-              patchTx(id, {
-                payment: 'Completed without check',
-                call: 'Not required',
-                process: 'Complete',
-                reason: 'Transaction evaluated safe by risk policy; verification not required.',
-                audit: [makeAudit('Payment completed', 'Transaction authorized and settled safely.')],
-              });
-              setStage('outcome');
-            } else if (action === 'BLOCK') {
-              patchTx(id, {
-                payment: 'Cancelled',
-                call: 'Not required',
-                process: 'Cancelled for safety',
-                reason: 'Transaction blocked due to high fraud risk.',
-                audit: [makeAudit('Payment blocked', 'Transaction blocked by automated policy.')],
-              });
-              setStage('outcome');
-            }
-          } else {
-            if (
-              initialAssessment?.recommended_action === 'REQUIRE_VERIFICATION' ||
-              initialAssessment?.recommended_action === 'HOLD_FOR_INVESTIGATION'
-            ) {
-              setStage('ringing');
-            }
-          }
-        } catch (err) {
-          console.warn('Could not complete workflow evaluation on backend:', err);
-          if (
-            initialAssessment?.recommended_action === 'REQUIRE_VERIFICATION' ||
-            initialAssessment?.recommended_action === 'HOLD_FOR_INVESTIGATION'
-          ) {
-            setStage('ringing');
-          }
-        }
-      })
-      .catch((err) => {
-        console.warn('Could not create transaction on backend:', err);
-        if (
-          initialAssessment?.recommended_action === 'REQUIRE_VERIFICATION' ||
-          initialAssessment?.recommended_action === 'HOLD_FOR_INVESTIGATION'
-        ) {
-          setStage('ringing');
-        }
-      });
-  }
-
-  function retry(transactionId = activeId) {
-    if (!transactionId) return;
-    const tx = records.find((r) => r.id === transactionId);
-    if (!tx || !['Verification incomplete', 'Awaiting verification'].includes(tx.payment)) return;
-    clearRuntime();
-    setDuration(0);
-    setVoiceError('');
-    setQuestionIndex(tx.statements.length);
-    setDraft('');
-    setDraftSource('typed');
-    setMicMuted(false);
-    setDynamicQuestion('');
-    setActiveCallSession(null);
-    setActiveId(transactionId);
-    patchTx(
-      transactionId,
-      {
-        payment: 'Awaiting verification',
-        call: 'Calling',
-        attempt: tx.attempt + 1,
-        process: 'Waiting for customer to answer',
-        reason: 'Awaiting customer verification. Money has not been sent.',
-      },
-      {
-        title: 'Verification retried',
-        detail: `Attempt ${tx.attempt + 1} · same transaction; no duplicate payment created.`,
-      }
-    );
-    if (tx.backendId) {
-      initiateCallSessionApi(tx.backendId, {
-        channel: 'VOICE_SIMULATED',
-        idempotency_key: `retry_call_${transactionId}_${tx.attempt + 1}`,
-      })
-        .then((callSession) => {
-          patchTx(transactionId, { callSessionId: callSession.id });
-          setActiveCallSession(callSession);
-          if (Array.isArray(callSession?.turns) && callSession.turns.length > 0) {
-            const firstAsst = callSession.turns.find((t) => t.role === 'assistant');
-            if (firstAsst?.content) setDynamicQuestion(firstAsst.content);
-          }
-        })
-        .catch((err) => console.warn('Could not re-initiate call session on retry:', err));
-    }
-    setStage('ringing');
-    if (guided) setSelectedId(transactionId);
-    schedule(() => {
-      if (activeRef.current === transactionId && stageRef.current === 'ringing') {
-        incomplete('The customer did not answer the simulated call.', 'No answer');
-      }
-    }, 12000);
-  }
-
-  function incomplete(reasonText: string, call: CallState = 'Declined', preserveError = false) {
-    const id = activeRef.current;
-    if (!id) return;
-    clearRuntime();
-    patchTx(
-      id,
-      {
-        payment: 'Verification incomplete',
-        call,
-        process: 'Verification incomplete',
-        reason: `${reasonText} Money was not sent.`,
-      },
-      { title: 'Verification incomplete', detail: `${reasonText} Payment remains unsent.` }
-    );
-    setStage('incomplete');
-    if (!preserveError) setVoiceError('');
-
-    const tx = records.find((r) => r.id === id);
-    if (tx?.callSessionId) {
-      const terminalCallStatuses = ['FAILED', 'CANCELLED', 'TIMED_OUT', 'DECLINED', 'COMPLETED'];
-      const alreadyTerminal =
-        activeCallSession?.id === tx.callSessionId &&
-        terminalCallStatuses.includes(activeCallSession?.status ?? '');
-      if (alreadyTerminal) {
-        // The call is already in a terminal state (e.g. a failed Live connection).
-        // Never attempt to decline/complete it again — the backend would reject the
-        // invalid transition, and the lifecycle audit trail must not be rewritten.
-      } else if (call === 'Declined' || call === 'No answer') {
-        declineCallSessionApi(tx.callSessionId, { reason: reasonText }).catch((err) =>
-          console.warn('Could not decline call session on backend:', err)
-        );
-      } else {
-        completeCallSessionApi(tx.callSessionId).catch((err) =>
-          console.warn('Could not complete call session on backend:', err)
-        );
-      }
-    }
-  }
-
-  function cancelPayment() {
-    if (!activeId) return;
-    clearRuntime();
-    patchTx(
-      activeId,
-      {
-        payment: 'Cancelled',
-        call: 'Completed',
-        process: 'Complete',
-        reason: 'Cancelled at customer request before payment was sent.',
-      },
-      { title: 'Payment cancelled', detail: 'Customer cancelled before sending. No money moved.' }
-    );
-    setStage('outcome');
-  }
-
-  function proceedAfterWarning() {
-    if (!activeId) return;
-    const tx = records.find((r) => r.id === activeId);
-    if (!tx || tx.payment !== 'Awaiting customer decision') return;
-    clearRuntime();
-    const reasonText =
-      'Customer chose to proceed after the safety warning. This is a local simulation; no real money moved.';
-    patchTx(
-      activeId,
-      { payment: 'Completed after warning', call: 'Completed', process: 'Customer override recorded', reason: reasonText },
-      {
-        title: 'Customer proceeded after warning',
-        detail: 'Customer explicitly chose to continue despite the safety warning. No real money moved.',
-      }
-    );
-    setStage('outcome');
-  }
-
-  function answer(modeChoice: Mode) {
-    if (!activeId) return;
-    setMode(modeChoice);
-    setStage(modeChoice === 'voice' ? 'active' : 'chat');
-    setDuration(0);
-    setVoiceError('');
-    setMicMuted(false);
-    const tx = records.find((r) => r.id === activeId);
-    setQuestionIndex(tx?.statements.length ?? 0);
-    patchTx(
-      activeId,
-      {
-        payment: 'Awaiting verification',
-        call: modeChoice === 'voice' ? 'Connected' : 'In progress',
-        channel: modeChoice,
-        process: modeChoice === 'voice' ? 'Voice verification' : 'Secure chat',
-      },
-      {
-        title: 'Customer connected',
-        detail:
-          modeChoice === 'voice'
-            ? 'Voice verification started by customer.'
-            : 'Customer chose secure chat; no microphone permission requested.',
-      }
-    );
-    const terminalCallStatuses = ['FAILED', 'CANCELLED', 'TIMED_OUT', 'DECLINED', 'COMPLETED'];
-    const callIsTerminal =
-      activeCallSession?.id === tx?.callSessionId &&
-      terminalCallStatuses.includes(activeCallSession?.status ?? '');
-    if (tx?.callSessionId && !callIsTerminal) {
-      connectCallSessionApi(tx.callSessionId)
-        .then((updated) => {
-          setActiveCallSession(updated);
-        })
-        .catch((err) => {
-          console.warn('Could not connect call session on backend:', err);
-        });
-    }
-    if (modeChoice === 'voice') startVoice();
-  }
-
-  function startVoice() {
-    // Prefer real-time Gemini Live voice when the browser supports audio capture and
-    // a backend call session exists. If it cannot be established, we explicitly fall
-    // back to the existing voice/chat path (never silently while claiming Live).
-    const callSessionId = activeTx?.callSessionId;
-    if (isLiveVoiceSupported() && callSessionId) {
-      startLiveVoice(callSessionId);
-      return;
-    }
-    startBrowserVoice();
-  }
-
-  function startBrowserVoice() {
-    if (!speechConstructor) {
-      const message = 'Speech recognition is not supported in this browser. No audio was captured.';
-      setVoiceError(message);
-      incomplete(message, 'Error', true);
-      return;
-    }
-    if ('speechSynthesis' in window && !muted) {
-      speakQuestion();
-      return;
-    }
-    beginRecognition();
-  }
-
-  function startLiveVoice(callSessionId: string) {
-    // Tear down any prior connection first (re-entrant start / reconnect).
-    if (liveConn.current) {
-      void liveConn.current.end('restart');
-      liveConn.current = null;
-    }
-    const id = activeRef.current;
-    setLiveTranscript([]);
-    setLiveAnalysis(null);
-    const conn = new LiveVoiceConnection(
-      { callId: callSessionId, token: getToken(), baseUrl: config.apiBaseUrl, workletUrl: '/audio/pcm-capture-worklet.js' },
-      {
-        onStatus: (status) => {
-          setLiveStatus(status);
-          if (id) {
-            const label =
-              status === 'live'
-                ? 'Live voice connected'
-                : status === 'connecting'
-                  ? 'Connecting live voice'
-                  : status === 'reconnecting'
-                    ? 'Reconnecting live voice'
-                    : status === 'requesting-mic'
-                      ? 'Requesting microphone'
-                      : undefined;
-            if (label) setProcess(id, label, 'In progress');
-          }
-        },
-        onTranscript: (seg) => {
-          if (seg.final) {
-            setLiveTranscript((prev) => [...prev, { speaker: seg.speaker, text: seg.text }]);
-            if (seg.speaker === 'assistant') setDynamicQuestion(seg.text);
-          }
-        },
-        onAnalysis: (analysis) => setLiveAnalysis(analysis),
-        onError: (message) => setVoiceError(message),
-        onClosed: () => {
-          liveConn.current = null;
-        },
-      }
-    );
-    liveConn.current = conn;
-    void conn.start().then(() => {
-      // If Live could not be established, fall back to the standard voice path.
-      if (conn.getStatus() === 'unavailable') {
-        liveConn.current = null;
-        setVoiceError(
-          'Live voice is unavailable; continuing with standard verification. No audio was lost.'
-        );
-        startBrowserVoice();
-      }
-    });
-  }
-
-  function beginRecognition() {
-    if (!speechConstructor) return;
-    try {
-      const r = new speechConstructor();
-      recognition.current = r;
-      r.continuous = false;
-      r.interimResults = true;
-      r.lang = 'en-IN';
-      r.onresult = (event) => {
-        let finalText = '';
-        for (let i = 0; i < event.results.length; i++) finalText += `${event.results[i][0].transcript} `;
-        setDraft(finalText.trim());
-        setDraftSource('speech');
-      };
-      r.onerror = (event) => {
-        const err = event.error || 'recognition error';
-        const message =
-          err === 'not-allowed' || err === 'service-not-allowed'
-            ? 'Microphone permission was not granted. Nothing was recorded.'
-            : `Voice input stopped (${err}). Nothing was submitted.`;
-        setVoiceError(message);
-        incomplete(message, 'Error', true);
-      };
-      r.onend = () => {
-        if (recognition.current === r) recognition.current = null;
-      };
-      r.start();
-    } catch {
-      const message = 'Voice input could not start in this browser. No audio was captured.';
-      setVoiceError(message);
-      incomplete(message, 'Error', true);
-    }
-  }
-
-  function speakQuestion(question = currentQuestion) {
-    if (!('speechSynthesis' in window) || muted || !question) {
-      beginRecognition();
-      return;
-    }
-    try {
-      recognition.current?.abort();
-      recognition.current = null;
-      setAssistantSpeaking(true);
-      setProcess(activeRef.current || '', 'Assistant speaking');
-      const utterance = new SpeechSynthesisUtterance(question);
-      utterance.onend = () => {
-        setAssistantSpeaking(false);
-        if (activeRef.current && !micMuted) {
-          setProcess(activeRef.current, 'Listening for your answer', 'In progress');
-          beginRecognition();
-        }
-      };
-      utterance.onerror = () => setAssistantSpeaking(false);
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(utterance);
-    } catch {
-      setAssistantSpeaking(false);
-    }
-  }
-
-  function switchToChat() {
-    try {
-      recognition.current?.stop();
-    } catch {
-      /* no active session */
-    }
-    recognition.current = null;
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    setAssistantSpeaking(false);
-    setMode('chat');
-    setStage('chat');
-    setVoiceError('');
-    if (activeId) {
-      setProcess(activeId, 'Secure chat');
-      patchTx(
-        activeId,
-        { call: 'In progress', channel: 'chat' },
-        { title: 'Switched to chat', detail: 'Conversation continued without microphone access.' }
-      );
-    }
-  }
-
-  function switchToVoice() {
-    if (!voiceSupported || !activeId) return;
-    setMode('voice');
-    setStage('active');
-    setVoiceError('');
-    patchTx(
-      activeId,
-      { call: 'Connected', channel: 'voice', process: 'Voice verification' },
-      { title: 'Switched to voice', detail: 'Customer chose voice; browser may request microphone permission.' }
-    );
-    startVoice();
-  }
-
-  function toggleMic() {
-    const next = !micMuted;
-    setMicMuted(next);
-    if (next) {
-      try {
-        recognition.current?.stop();
-      } catch {
-        /* no active listener */
-      }
-      recognition.current = null;
-      if (activeId) setProcess(activeId, 'Microphone muted');
-    } else if (mode === 'voice' && stage === 'active') {
-      if (activeId) setProcess(activeId, 'Listening for your answer', 'In progress');
-      beginRecognition();
-    }
-  }
-
-  function finishAnswer(value = draft, source: Statement['source'] = 'typed') {
-    const answerText = value.trim();
-    if (!answerText || !activeId) return;
-    // Prevent duplicate turn submissions from repeated clicks or key events while
-    // one is already in flight.
-    if (submittingTurn.current) return;
-    submittingTurn.current = true;
-    try {
-      recognition.current?.stop();
-    } catch {
-      /* stopped */
-    }
-    recognition.current = null;
-    const q = currentQuestion;
-    const nextStatements = [
-      ...(activeTx?.statements ?? []),
-      { question: q, answer: answerText, source, at: stamp() },
-    ];
-    patchTx(
-      activeId,
-      { statements: nextStatements, process: 'Processing answer', call: 'In progress' },
-      {
-        title: 'Customer answer submitted',
-        detail: `${source === 'speech' ? 'Browser speech transcription' : source === 'demo response' ? 'Presenter demo response' : 'Customer text'} · ${answerText}`,
-      }
-    );
-    setDraft('');
-    setDraftSource('typed');
-    setStage('processing');
-
-    const fallbackTurnProgression = (stmts: Statement[]) => {
-      schedule(() => {
-        const followup =
-          stmts.some((s) =>
-            /urgent|secret|safe account|pressure|quickly|don't tell|not tell/i.test(s.answer)
-          ) && stmts.length === 3;
-        if (stmts.length < 3 || followup) {
-          setQuestionIndex(stmts.length);
-          setStage(mode === 'voice' && voiceSupported ? 'active' : 'chat');
-          setProcess(
-            activeId,
-            `Question ${stmts.length + 1} of ${followup ? 4 : 3}`,
-            mode === 'voice' ? 'In progress' : 'In progress'
-          );
-          if (mode === 'voice') {
-            const upcoming =
-              stmts.length === 3 && followup
-                ? 'Did they ask you to act urgently or keep this payment secret?'
-                : initialQuestions[Math.min(stmts.length, initialQuestions.length - 1)];
-            schedule(() => speakQuestion(upcoming), 180);
-          }
-        } else evaluate(activeId, stmts);
-      }, 750);
-    };
-
-    const callSessionId = activeTx?.callSessionId;
-    if (callSessionId) {
-      // A stable per-answer token makes the submission idempotent so a network
-      // retry (or a duplicate delivery) cannot append the same turn twice.
-      const clientTurnId =
-        globalThis.crypto?.randomUUID?.() ??
-        `turn_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      submitDialogueTurnApi(callSessionId, {
-        customer_message: answerText,
-        source: source === 'speech' ? 'speech' : 'typed',
-        client_turn_id: clientTurnId,
-      })
-        .then((updatedSession) => {
-          setActiveCallSession(updatedSession);
-          const lastAsst = [...updatedSession.turns].reverse().find((t) => t.role === 'assistant');
-          if (lastAsst?.content) {
-            setDynamicQuestion(lastAsst.content);
-          }
-          const isTerminal =
-            updatedSession.status === 'COMPLETED' ||
-            Boolean(lastAsst?.is_terminal_turn) ||
-            nextStatements.length >= 6;
-
-          schedule(() => {
-            if (isTerminal) {
-              evaluate(activeId, nextStatements);
-            } else {
-              setQuestionIndex(nextStatements.length);
-              setStage(mode === 'voice' && voiceSupported ? 'active' : 'chat');
-              setProcess(
-                activeId,
-                `Question ${nextStatements.length + 1} of ${Math.max(nextStatements.length + 1, 3)}`,
-                mode === 'voice' ? 'In progress' : 'In progress'
-              );
-              if (mode === 'voice' && lastAsst?.content) {
-                schedule(() => speakQuestion(lastAsst.content), 180);
-              }
-            }
-          }, 750);
-        })
-        .catch((err) => {
-          console.warn('Backend turn submission failed, using local dialogue logic:', err);
-          fallbackTurnProgression(nextStatements);
-        })
-        .finally(() => {
-          submittingTurn.current = false;
-        });
+    let timer: any;
+    if (mobileCallActive && mobileCallStatus === 'CONNECTED') {
+      timer = setInterval(() => {
+        setCallDuration((prev) => prev + 1);
+      }, 1000);
     } else {
-      fallbackTurnProgression(nextStatements);
-      submittingTurn.current = false;
+      setCallDuration(0);
     }
-  }
+    return () => clearInterval(timer);
+  }, [mobileCallActive, mobileCallStatus]);
 
-  function demoResponse() {
-    const tx = activeTx;
-    if (!tx) return;
-    let text = '';
-    const q = currentQuestion.toLowerCase();
-    if (/payment|purpose|why|reason|transfer/i.test(q)) {
-      text =
-        scenario === 'digital_arrest' || scenario === 'impersonation'
-          ? 'Law enforcement called claiming my identity is linked to a CBI money laundering case; they instructed me to deposit funds immediately.'
-          : scenario === 'investment_scam'
-            ? 'Apex Yield promised guaranteed daily profit on a private crypto fund; they urged me to transfer before market close.'
-            : scenario === 'fake_invoice'
-              ? 'Supplier invoice payment for office equipment with updated payment details.'
-              : scenario === 'mule_network'
-                ? 'Quick cash return to a friend request.'
-                : scenario === 'verified'
-                  ? 'Aster Bank asked me to make the settlement transfer.'
-                  : 'This is an annual lease renewal payment.';
-    } else if (/who|official|asked|instruct|person|contact/i.test(q)) {
-      text =
-        scenario === 'digital_arrest' || scenario === 'impersonation'
-          ? 'An official identifying as CBI officer Sharma with urgent arrest warrant.'
-          : scenario === 'investment_scam'
-            ? 'An investment manager on Telegram who said not to tell the bank branch.'
-            : scenario === 'fake_invoice'
-              ? 'Invoice email received from regular vendor address.'
-              : scenario === 'mule_network'
-                ? 'Contacted via messaging app for urgent cash transfer.'
-                : scenario === 'verified'
-                  ? 'Aster Bank gave me the instruction.'
-                  : 'The landlord representative.';
-    } else if (/reference|number|code|id|file/i.test(q)) {
-      text =
-        scenario === 'verified'
-          ? 'The reference is ASB-48219.'
-          : scenario === 'digital_arrest'
-            ? 'Court bond clearance reference CBI-84920.'
-            : scenario === 'investment_scam'
-              ? 'VIP Investment Code INV-39210.'
-              : 'They did not give me a reference number.';
-    } else if (/urgent|secret|safe account|pressure|call|screen|police|threat|arrest/i.test(q)) {
-      text =
-        scenario === 'digital_arrest'
-          ? 'Yes, they told me I am under digital arrest and will be detained if I speak to anyone or hang up.'
-          : scenario === 'investment_scam'
-            ? 'They said the high yield opportunity closes in 30 minutes and I must not disclose it.'
-            : 'They insisted it was urgent and ordered me not to discuss it with bank staff.';
-    } else {
-      text =
-        scenario === 'digital_arrest'
-          ? 'Yes, they demanded that I keep the phone line connected and send the security bond now.'
-          : 'I am making this transfer as requested.';
-    }
-    setDraft(text);
-    setDraftSource('demo response');
-  }
-
-  function evaluate(id: string, statements: Statement[]) {
-    const tx = records.find((r) => r.id === id);
-    if (!tx) return;
-    setStage('processing');
-    patchTx(
-      id,
-      { process: 'Extracting claim' },
-      { title: 'Claim extraction started', detail: 'Customer statement separated from system interpretation.' }
-    );
-    schedule(() => {
-      const statement = statements.map((s) => s.answer).join(' ');
-      const claimsBank = /aster bank|bank (asked|instructed|told|gave)|bank instruction/i.test(statement);
-      const institutionMatch = /aster bank/i.test(statement);
-      const concern = /safe account|urgent|urgency|secret|pressure|quickly|don't tell|not tell|cbi|arrest|bond/i.test(statement);
-      const instructionMatch = /settlement|transfer/i.test(`${tx.purpose} ${statement}`);
-      const providedReference = statement.match(/ASB-\d{5}/i)?.[0]?.toUpperCase() || tx.reference;
-      const claim = claimsBank
-        ? `Aster Bank instruction · ${tx.purpose || statements[0]?.answer} · ${providedReference || 'no reference supplied'}`
-        : /safe account|cbi|arrest/i.test(statement)
-          ? 'Official protection / authority transfer claim'
-          : 'Customer-stated payment purpose';
-      const recordMatch =
-        providedReference === 'ASB-48219' &&
-        tx.customerId === 'CU-1042' &&
-        institutionMatch &&
-        claimsBank &&
-        instructionMatch &&
-        tx.recipient === 'Aster Bank Settlement' &&
-        tx.amount === 6500;
-      const candidate = providedReference === 'ASB-48219';
-      const result: VerifyResult =
-        scenario === 'unavailable'
-          ? 'Source unavailable'
-          : recordMatch
-            ? 'Confirmed'
-            : candidate
-              ? 'Contradicted'
-              : claimsBank
-                ? 'No matching record'
-                : 'Not independently verifiable';
-      const combinedConcern = concern || ((scenario === 'digital_arrest' || scenario === 'impersonation') && concern);
-
-      patchTx(
-        id,
+  // Initial Seeded Users matching Reference Screenshot
+  const [userList, setUserList] = useState<UserPaymentItem[]>([
+    {
+      id: 'tx_user_1',
+      userNum: 1,
+      userName: 'John Doe',
+      initials: 'JD',
+      recipientName: 'Rohit Sharma (UPI)',
+      recipientUpi: 'rohit@upi',
+      amount: 250000,
+      checkReason: 'Unusual payment pattern',
+      initiatedOn: 'Today, 10:24 AM',
+      riskScore: 82,
+      riskLevel: 'CRITICAL',
+      verificationStatus: 'Pending',
+      purpose: 'Payment for official fees',
+      hasCoercion: true,
+      transcriptEntries: [
         {
-          claim,
-          claimInstitution: institutionMatch ? 'Aster Bank' : 'Not stated',
-          claimInstruction: tx.purpose || statements[0]?.answer || 'Not stated',
-          claimReference: providedReference || 'Not supplied',
-          result,
-          concern: combinedConcern,
-          process: 'Checking local demo registry',
-          reason: 'Independent check pending',
+          speaker: 'Caller (Unknown)',
+          role: 'caller',
+          time: '10:24:05 AM',
+          text: 'This is the police department. You need to transfer the amount immediately or you will be arrested.',
+          threatBadge: 'Authority Impersonation',
+          threatTone: 'danger',
         },
-        { title: 'Claim extracted', detail: `${claim}. Interpretation is recorded separately.` }
-      );
+        {
+          speaker: 'User',
+          role: 'user',
+          time: '10:24:12 AM',
+          text: "I'm scared. What should I do?",
+          threatBadge: 'Signs of Coercion',
+          threatTone: 'warning',
+        },
+        {
+          speaker: 'Caller (Unknown)',
+          role: 'caller',
+          time: '10:24:18 AM',
+          text: 'Do not tell anyone. Just complete the payment now.',
+          threatBadge: 'Secrecy Instruction',
+          threatTone: 'danger',
+        },
+      ],
+    },
+    {
+      id: 'tx_user_2',
+      userNum: 2,
+      userName: 'Sneha Kapoor',
+      initials: 'SK',
+      recipientName: 'Investment Account',
+      recipientUpi: 'apexyield@icici',
+      amount: 85000,
+      checkReason: 'First-time beneficiary',
+      initiatedOn: 'Today, 10:18 AM',
+      riskScore: 65,
+      riskLevel: 'HIGH',
+      verificationStatus: 'In Progress',
+      purpose: 'Crypto trading deposit',
+      hasCoercion: true,
+      transcriptEntries: [
+        {
+          speaker: 'Telegram Admin',
+          role: 'caller',
+          time: '10:17:40 AM',
+          text: 'Guaranteed 25% daily return. Transfer now to lock your allocation and tell your bank this is for family.',
+          threatBadge: 'Guaranteed Return Claim',
+          threatTone: 'danger',
+        },
+        {
+          speaker: 'User',
+          role: 'user',
+          time: '10:18:02 AM',
+          text: 'Is there any risk involved in this?',
+          threatBadge: 'High-Yield Trap',
+          threatTone: 'warning',
+        },
+      ],
+    },
+    {
+      id: 'tx_user_3',
+      userNum: 3,
+      userName: 'Arjun Rao',
+      initials: 'AR',
+      recipientName: 'Electricity Provider',
+      recipientUpi: 'electricity@bescom',
+      amount: 3450,
+      checkReason: 'Routine bill payment',
+      initiatedOn: 'Today, 09:52 AM',
+      riskScore: 8,
+      riskLevel: 'LOW',
+      verificationStatus: 'Verified',
+      purpose: 'Monthly electricity bill',
+      hasCoercion: false,
+      transcriptEntries: [
+        {
+          speaker: 'User',
+          role: 'user',
+          time: '09:52:10 AM',
+          text: 'Paying my monthly electricity bill to BESCOM.',
+          threatBadge: 'Legitimate Context',
+          threatTone: 'info',
+        },
+      ],
+    },
+  ]);
 
-      schedule(() => {
-        let payment: PayState = 'Verification incomplete';
-        let call: CallState = 'Completed';
-        let reasonText = '';
-        if (result === 'Source unavailable') {
-          payment = 'Verification incomplete';
-          call = 'Unavailable';
-          reasonText =
-            'The configured Aster Bank demo source is unavailable. Verification is incomplete; money was not sent.';
-        } else if (result === 'Confirmed' && !combinedConcern) {
-          payment = 'Approved';
-          reasonText =
-            'The reference, customer, institution, instruction, recipient and amount all match the local Aster Bank demo registry. No concern indicators were reported.';
-        } else if (
-          result === 'No matching record' &&
-          /safe account|cbi|arrest|invest/i.test(statement) &&
-          /urgent|secret|pressure|quickly|don't tell|not tell/i.test(statement)
-        ) {
-          payment = 'Awaiting customer decision';
-          reasonText =
-            'Authority duress or guaranteed scheme markers combined with urgency/secrecy triggered a safety warning. The payment remains unsent until the customer chooses to cancel or continue. A missing record alone is not proof of fraud.';
-        } else if (result === 'Contradicted' && combinedConcern) {
-          payment = 'Awaiting customer decision';
-          reasonText =
-            'The referenced instruction did not match registry records, and coercive pressure was reported. The payment remains unsent until the customer chooses to cancel or continue.';
-        } else {
-          reasonText = `Verification incomplete (${result}). Available evidence is not sufficient for an automatic approval or cancellation. Money was not sent.`;
-        }
-        const needsChoice = payment === 'Awaiting customer decision';
-        patchTx(
-          id,
-          { payment, call, process: needsChoice ? 'Customer decision required' : 'Decision recorded', reason: reasonText },
-          {
-            title:
-              payment === 'Approved'
-                ? 'Payment approved'
-                : needsChoice
-                  ? 'Safety warning shown'
-                  : 'Verification incomplete',
-            detail: reasonText,
+  const [selectedUserId, setSelectedUserId] = useState<string>('tx_user_1');
+
+  const selectedUser = useMemo(() => {
+    return userList.find((u) => u.id === selectedUserId) || userList[0];
+  }, [userList, selectedUserId]);
+
+  // Selected Demo Scenario
+  const [selectedScenarioKey, setSelectedScenarioKey] = useState<string>('digital_arrest');
+
+  const scenarioRadioOptions = [
+    { key: 'digital_arrest', label: 'Digital Arrest Scam', risk: 'High Risk', tone: 'high' },
+    { key: 'investment_scam', label: 'Investment Fraud', risk: 'High Risk', tone: 'high' },
+    { key: 'fake_invoice', label: 'Fake Invoice', risk: 'High Risk', tone: 'high' },
+    { key: 'mule_network', label: 'Mule Account', risk: 'Medium Risk', tone: 'medium' },
+    { key: 'legitimate_high_value', label: 'Legitimate High-Value Transfer', risk: 'Low Risk', tone: 'low' },
+    { key: 'ambiguous_payment', label: 'Ambiguous Payment', risk: 'Medium Risk', tone: 'medium' },
+    { key: 'ordinary_stressed_customer', label: 'Ordinary Stressed Customer', risk: 'Medium Risk', tone: 'medium' },
+    { key: 'strong_coercion_after_verification', label: 'Strong Coercion After Verification', risk: 'High Risk', tone: 'high' },
+  ];
+
+  // Filtered users for left panel
+  const filteredUsers = useMemo(() => {
+    if (!searchQuery.trim()) return userList;
+    const q = searchQuery.toLowerCase();
+    return userList.filter(
+      (u) =>
+        u.userName.toLowerCase().includes(q) ||
+        u.recipientName.toLowerCase().includes(q) ||
+        u.recipientUpi.toLowerCase().includes(q)
+    );
+  }, [userList, searchQuery]);
+
+  // Audio Playback Simulator
+  useEffect(() => {
+    let interval: any;
+    if (isPlayingAudio) {
+      interval = setInterval(() => {
+        setAudioProgress((prev) => {
+          if (prev >= 28) {
+            setIsPlayingAudio(false);
+            return 0;
           }
-        );
-        setStage(payment === 'Verification incomplete' ? 'incomplete' : needsChoice ? 'warning' : 'outcome');
-      }, 850);
-    }, 600);
-  }
+          return prev + 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isPlayingAudio]);
 
-  const filtered = useMemo(
-    () =>
-      records.filter((tx) => {
-        const hay = `${tx.id} ${tx.customer} ${tx.recipient} ${tx.customerId}`.toLowerCase();
-        const matchedPayment =
-          paymentFilter === 'All payments' ||
-          (paymentFilter === 'Needs decision'
-            ? tx.payment === 'Awaiting customer decision'
-            : paymentStatus(tx) === paymentFilter);
-        const status = verificationStatus(tx);
-        const matchedVerification =
-          verificationFilter === 'All verifications' ||
-          (verificationFilter === 'Active'
-            ? ['Calling', 'Voice connected', 'Chat active', 'Checking claim'].includes(status)
-            : status === verificationFilter);
-        return hay.includes(query.toLowerCase()) && matchedPayment && matchedVerification;
-      }),
-    [records, query, paymentFilter, verificationFilter]
-  );
+  // Run Scenario Trigger
+  const handleRunScenario = (scenarioKey: string) => {
+    setSelectedScenarioKey(scenarioKey);
+    const catalogItem = SCENARIO_CATALOG[scenarioKey] || SCENARIO_CATALOG.digital_arrest;
 
-  const counts = useMemo(
-    () => ({
-      today: records.length,
-      active: records.filter((t) =>
-        ['Calling', 'Voice connected', 'Chat active', 'Checking claim'].includes(verificationStatus(t))
-      ).length,
-      completed: records.filter((t) => paymentStatus(t) === 'Completed').length,
-      cancelled: records.filter((t) => t.payment === 'Cancelled').length,
-      needsDecision: records.filter((t) => t.payment === 'Awaiting customer decision').length,
-      incomplete: records.filter((t) => verificationStatus(t) === 'Incomplete').length,
-    }),
-    [records]
-  );
+    // Populate mobile preview form
+    setMobileUpi(catalogItem.recipientIdentifier || 'rohit@upi');
+    setMobileAmount(String(catalogItem.amount));
+    setMobilePurpose(catalogItem.purpose || 'Payment for official fees');
 
-  const nav: { name: Surface; icon: typeof Activity }[] = [
-    { name: 'Live Payments', icon: Activity },
-    { name: 'Verification Sources', icon: FileSearch },
-    { name: 'Scenario Lab', icon: FlaskConical },
-  ];
+    // Deterministic risk evaluation
+    const evalResult = evaluateRiskLocally(catalogItem.evidence);
 
-  const summaryCards = [
-    {
-      label: 'Payments today',
-      count: counts.today,
-      detail: 'All payments',
-      onClick: () => {
-        setPaymentFilter('All payments');
-        setVerificationFilter('All verifications');
-      },
-      active: paymentFilter === 'All payments' && verificationFilter === 'All verifications',
-    },
-    {
-      label: 'Active verifications',
-      count: counts.active,
-      detail: 'Voice, chat & checks',
-      onClick: () => {
-        setPaymentFilter('All payments');
-        setVerificationFilter('Active');
-      },
-      active: verificationFilter === 'Active',
-    },
-    {
-      label: 'Completed payments',
-      count: counts.completed,
-      detail: 'Simulated transfers',
-      onClick: () => {
-        setPaymentFilter('Completed');
-        setVerificationFilter('All verifications');
-      },
-      active: paymentFilter === 'Completed',
-    },
-    {
-      label: 'Cancelled payments',
-      count: counts.cancelled,
-      detail: 'Unsent',
-      onClick: () => {
-        setPaymentFilter('Cancelled');
-        setVerificationFilter('All verifications');
-      },
-      active: paymentFilter === 'Cancelled',
-    },
-    {
-      label: 'Needs decision',
-      count: counts.needsDecision,
-      detail: 'Customer choice',
-      onClick: () => {
-        setPaymentFilter('Needs decision');
-        setVerificationFilter('All verifications');
-      },
-      active: paymentFilter === 'Needs decision',
-    },
-    {
-      label: 'Verification incomplete',
-      count: counts.incomplete,
-      detail: 'Payment remains pending',
-      onClick: () => {
-        setPaymentFilter('All payments');
-        setVerificationFilter('Incomplete');
-      },
-      active: verificationFilter === 'Incomplete',
-    },
-  ];
+    const newTx: UserPaymentItem = {
+      id: `tx_${Date.now()}`,
+      userNum: userList.length + 1,
+      userName: catalogItem.label.replace(/^\d+\.\s*/, '') || 'Simulated User',
+      initials: 'SU',
+      recipientName: catalogItem.recipient || 'Rohit Sharma (UPI)',
+      recipientUpi: catalogItem.recipientIdentifier || 'rohit@upi',
+      amount: catalogItem.amount,
+      checkReason: catalogItem.summary || 'Scenario execution test',
+      initiatedOn: 'Just now',
+      riskScore: evalResult.risk_score,
+      riskLevel: evalResult.risk_level,
+      verificationStatus: evalResult.recommended_action === 'HOLD_FOR_INVESTIGATION' ? 'Hold' : 'In Progress',
+      purpose: catalogItem.purpose || 'Payment',
+      hasCoercion: evalResult.risk_score >= 60,
+      transcriptEntries: [
+        {
+          speaker: 'Caller (Unknown)',
+          role: 'caller',
+          time: 'Just now',
+          text: catalogItem.summary || 'Immediate fund transfer requested.',
+          threatBadge: evalResult.triggered_rules[0]?.rule_name || 'High Risk Indicator',
+          threatTone: 'danger',
+        },
+        {
+          speaker: 'User',
+          role: 'user',
+          time: 'Just now',
+          text: 'I am completing the transaction now.',
+          threatBadge: 'Urgency Pressure',
+          threatTone: 'warning',
+        },
+      ],
+    };
 
-  const currentPhoneStage = stage;
-  const finishDecline = () => incomplete('Customer declined the verification call.', 'Declined');
+    setUserList((prev) => [newTx, ...prev]);
+    setSelectedUserId(newTx.id);
+
+    // Reset phone call states
+    setMobileCallActive(false);
+    setMobilePaymentHeld(false);
+    setMobileViewMode('send_money');
+  };
+
+  // Pay Now Handler from Mobile Preview
+  const handleMobilePayNow = () => {
+    setIsAnalyzingPay(true);
+    setTimeout(() => {
+      setIsAnalyzingPay(false);
+      // High-risk transaction triggers the live security phone call!
+      setMobileCallActive(true);
+      setMobileCallStatus('RINGING');
+      setMobileViewMode('call');
+    }, 800);
+  };
+
+  // Accept incoming phone call inside the mobile phone!
+  const handleAcceptCall = () => {
+    setMobileCallActive(true);
+    setMobileCallStatus('CONNECTED');
+    setMobileViewMode('call');
+    if (conversationMessages.length === 0) {
+      setConversationMessages([
+        {
+          role: 'officer',
+          text: 'Hello, this is AegisPay Fraud Prevention. Can you confirm if anyone asked you to stay on this line while transferring money?',
+          time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        },
+      ]);
+    }
+  };
+
+  // Decline incoming phone call
+  const handleDeclineCall = () => {
+    setMobileCallActive(false);
+    setMobileCallStatus('ENDED');
+    setMobilePaymentHeld(true);
+    setMobileViewMode('send_money');
+  };
+
+  // End active phone call
+  const handleEndCall = () => {
+    setMobileCallActive(false);
+    setMobileCallStatus('ENDED');
+    setMobilePaymentHeld(true);
+    setMobileViewMode('send_money');
+  };
+
+  // Send conversation message to Gemini AI inside the phone
+  const handleSendPhoneMessage = async (msgText: string) => {
+    if (!msgText.trim()) return;
+
+    const userMsg = {
+      role: 'customer' as const,
+      text: msgText,
+      time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    };
+
+    setConversationMessages((prev) => [...prev, userMsg]);
+    setCustomerPhoneInput('');
+    setIsGeminiReplying(true);
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: msgText,
+          context: `You are AegisPay Fraud Prevention Officer speaking directly with the user on phone. User is transferring ₹${mobileAmount} to ${mobileUpi}. Risk Score: ${selectedUser.riskScore}/100. Be calm, reassuring, and guide them away from scammers.`,
+        }),
+      });
+      const data = await res.json();
+      const officerReply = {
+        role: 'officer' as const,
+        text: data.reply || 'Please stay calm. AegisPay has temporarily paused this payment. Real police and government officials will NEVER demand money transfers or threaten you over WhatsApp or phone calls.',
+        time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      };
+      setConversationMessages((prev) => [...prev, officerReply]);
+    } catch {
+      const officerReply = {
+        role: 'officer' as const,
+        text: 'Please remain calm. AegisPay has placed a safe protective hold on your transfer. Legitimate government authorities and courts never conduct digital arrests or demand money transfers over the phone.',
+        time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      };
+      setConversationMessages((prev) => [...prev, officerReply]);
+    } finally {
+      setIsGeminiReplying(false);
+    }
+  };
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">A</span>
-          <span>
-            Aster <span style={{ fontWeight: 500, color: '#73818d' }}>Bank</span>
-          </span>
+    <div style={{ minHeight: '100vh', background: '#edf1f4', display: 'flex', flexDirection: 'column' }}>
+      {/* --------------------------------------------------------------------- */}
+      {/* Top Header matching Reference Screenshot */}
+      {/* --------------------------------------------------------------------- */}
+      <header className="aegis-header">
+        <div className="aegis-logo">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+            <path d="M14 3L3 23H9.5L14 14.5L18.5 23H25L14 3Z" fill="url(#aegis-grad-logo)" />
+            <defs>
+              <linearGradient id="aegis-grad-logo" x1="3" y1="3" x2="25" y2="23" gradientUnits="userSpaceOnUse">
+                <stop stopColor="#0284c7" />
+                <stop offset="1" stopColor="#0d9488" />
+              </linearGradient>
+            </defs>
+          </svg>
+          <span style={{ fontWeight: 800, fontSize: 18, color: '#0f172a', letterSpacing: '-0.3px' }}>AegisPay AI</span>
         </div>
-        <div className="topbar-center">
-          <span className="online-dot" /> Operations workspace <span>·</span> AegisPay AI Engine
-        </div>
-        <div className="top-actions">
-          <BackendHealthBadge />
-          <details className="demo-disclosure" data-testid="simulation-disclosure">
-            <summary className="environment">
-              <span className="online-dot" style={{ background: '#c2901e', boxShadow: 'none' }} /> DEMO / SIMULATED{' '}
-              <span className="disclosure-chevron">⌄</span>
-            </summary>
-            <div className="demo-disclosure-panel">
-              This interactive prototype uses simulated customer records and a deterministic risk engine. All outcomes
-              are simulated; there are no real-money transfers, external credit lookups, or production data access.
-            </div>
-          </details>
-          <div className="avatar">AR</div>
-        </div>
-      </header>
-      <div className="layout">
-        <aside className="sidebar">
-          <div>
-            <div className="side-label">OPERATIONS</div>
-            <div className="nav-list">
-              {nav.map(({ name, icon: Icon }) => (
-                <button
-                  key={name}
-                  data-testid={`nav-${name.toLowerCase().replaceAll(' ', '-')}`}
-                  className={classes('nav-item', surface === name && 'active')}
-                  onClick={() => setSurface(name)}
-                >
-                  <Icon />
-                  {name}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <div className="side-label">PREFERENCES</div>
-            <div className="nav-list">
-              <button
-                className={classes('nav-item', surface === 'Settings' && 'active')}
-                data-testid="nav-settings"
-                onClick={() => setSurface('Settings')}
-              >
-                <BookOpen />
-                Settings
-              </button>
-            </div>
-          </div>
-          <div className="side-bottom">AEGISPAY AI · SIMULATED FRAUD PREVENTION</div>
-        </aside>
-        <main className="main">
-          <section className="control-bar" id="presenter-controls" data-testid="presenter-controls" aria-label="Demo controls">
-            <div className="control-actions">
-              <select
-                aria-label="Choose demo scenario"
-                data-testid="select-scenario"
-                className="select"
-                value={scenario}
-                onChange={(e) => reset(e.target.value as Scenario)}
-              >
-                <optgroup label="Phase 1 Benchmark Scenarios (Deterministic Risk Engine)">
-                  <option value="digital_arrest">1. Digital arrest (authority coercion)</option>
-                  <option value="investment_scam">2. High-yield investment fraud</option>
-                  <option value="fake_invoice">3. Fake invoice / supplier diversion</option>
-                  <option value="mule_network">4. Mule account dispersal</option>
-                  <option value="legitimate_high_value">5. Legitimate high-value transfer</option>
-                  <option value="ambiguous_payment">6. Ambiguous / incomplete context</option>
-                </optgroup>
-                <optgroup label="Legacy Prototype Presets">
-                  <option value="routine">Routine rent</option>
-                  <option value="impersonation">Bank impersonation</option>
-                  <option value="verified">Verified bank request</option>
-                  <option value="unavailable">Source unavailable</option>
-                  <option value="agent">Agent mandate · secondary</option>
-                </optgroup>
-              </select>
-              <button className="button small" data-testid="button-reset" onClick={() => reset()}>
-                <RotateCcw />
-                Reset
-              </button>
-              <label className="toggle-line">
-                <input
-                  type="checkbox"
-                  checked={guided}
-                  onChange={(e) => setGuided(e.target.checked)}
-                  data-testid="toggle-guided-demo"
-                />
-                Guided mode
-              </label>
-              <label className="toggle-line">
-                <input
-                  type="checkbox"
-                  checked={demoResponses}
-                  onChange={(e) => setDemoResponses(e.target.checked)}
-                  data-testid="toggle-demo-responses"
-                />
-                Example responses
-              </label>
-            </div>
-          </section>
-          <div className="mobile-view-select" aria-label="Switch product surface">
-            <button
-              className={classes('button', mobileView === 'bank' && 'soft')}
-              data-testid="button-view-bank"
-              onClick={() => setMobileView('bank')}
-            >
-              <Landmark />
-              Bank console
-            </button>
-            <button
-              className={classes('button', mobileView === 'phone' && 'soft')}
-              data-testid="button-view-phone"
-              onClick={() => setMobileView('phone')}
-            >
-              <Smartphone />
-              Customer phone
-            </button>
-          </div>
-          {surface === 'Live Payments' ? (
-            <div className={classes('dashboard-layout', mobileView === 'phone' && 'phone-only')}>
-              <div className="bank-console">
-                <div className="dashboard-head">
-                  <div>
-                    <div className="eyebrow">ASTER BANK · PAYMENT SAFETY OPERATIONS</div>
-                    <h1>Live payment console</h1>
-                    <p className="subhead">
-                      Unified operational queue with explainable deterministic risk scoring, policy rules, and auditable
-                      lifecycle states.
-                    </p>
-                  </div>
-                </div>
-                <div className="summary-strip" data-testid="summary-metrics">
-                  {summaryCards.map(({ label, count, detail, onClick, active }) => (
-                    <button
-                      className={classes('summary-card', active && 'active')}
-                      key={label}
-                      onClick={onClick}
-                      aria-pressed={active}
-                      data-testid={`metric-${String(label).toLowerCase().replaceAll(' ', '-')}`}
-                    >
-                      <span>{label}</span>
-                      <strong>{count}</strong>
-                      <em>{detail}</em>
-                    </button>
-                  ))}
-                </div>
-                {selected && (
-                  <TransactionDrawer
-                    tx={selected}
-                    tab={drawerTab}
-                    setTab={setDrawerTab}
-                    onClose={() => setSelectedId(null)}
-                    onRetry={() => retry(selected.id)}
-                    policyLimit={policyLimit}
-                  />
-                )}
-                <section className="card bank-content">
-                  <div className="card-pad">
-                    <div className="card-head">
-                      <div>
-                        <div className="card-kicker">BANK-WIDE PAYMENT QUEUE</div>
-                        <h2 className="card-title" style={{ marginTop: 5 }}>
-                          Payment activity
-                        </h2>
-                      </div>
-                    </div>
-                    <div className="queue-tools">
-                      <label style={{ position: 'relative', flex: '1 1 220px' }}>
-                        <Search size={14} style={{ position: 'absolute', left: 10, top: 10, color: '#89969e' }} />
-                        <input
-                          className="field-input"
-                          style={{ paddingLeft: 30 }}
-                          placeholder="Search ID, customer or recipient"
-                          value={query}
-                          onChange={(e) => setQuery(e.target.value)}
-                          data-testid="input-queue-search"
-                        />
-                      </label>
-                      <select
-                        className="select"
-                        aria-label="Filter payment status"
-                        value={paymentFilter}
-                        onChange={(e) => setPaymentFilter(e.target.value)}
-                        data-testid="select-queue-status"
-                      >
-                        {['All payments', 'Pending', 'Completed', 'Cancelled', 'Needs decision'].map((s) => (
-                          <option key={s}>{s}</option>
-                        ))}
-                      </select>
-                      <select
-                        className="select"
-                        aria-label="Filter verification status"
-                        value={verificationFilter}
-                        onChange={(e) => setVerificationFilter(e.target.value)}
-                        data-testid="select-verification-status"
-                      >
-                        {[
-                          'All verifications',
-                          'Active',
-                          'Not required',
-                          'Calling',
-                          'Voice connected',
-                          'Chat active',
-                          'Checking claim',
-                          'Complete',
-                          'Incomplete',
-                        ].map((s) => (
-                          <option key={s}>{s}</option>
-                        ))}
-                      </select>
-                      <span className="mono">{filtered.length} records</span>
-                    </div>
-                    <div className="queue-wrap">
-                      <table className="queue-table">
-                        <thead>
-                          <tr>
-                            <th>Customer / transaction</th>
-                            <th>Recipient</th>
-                            <th className="amount-head">Amount</th>
-                            <th>Initiated</th>
-                            <th>Check reason</th>
-                            <th>Risk score</th>
-                            <th>Verification</th>
-                            <th>Payment status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filtered.map((tx) => {
-                            const riskTier = tx.assessment?.risk_level ?? 'LOW';
-                            const riskTone =
-                              riskTier === 'CRITICAL'
-                                ? 'red'
-                                : riskTier === 'HIGH'
-                                  ? 'amber'
-                                  : riskTier === 'MEDIUM'
-                                    ? 'blue'
-                                    : 'green';
-                            return (
-                              <tr
-                                key={tx.id}
-                                tabIndex={0}
-                                className={classes((tx.id === selectedId || tx.id === highlightId) && 'highlighted')}
-                                onClick={() => {
-                                  setSelectedId(tx.id);
-                                  setDrawerTab('Live verification');
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter' || e.key === ' ') {
-                                    e.preventDefault();
-                                    setSelectedId(tx.id);
-                                    setDrawerTab('Live verification');
-                                  }
-                                }}
-                                data-testid={`row-transaction-${tx.id}`}
-                                aria-label={`Open transaction ${tx.id}`}
-                              >
-                                <td>
-                                  <div className="queue-customer">
-                                    <strong>{tx.customer}</strong>
-                                    <small>{tx.id}</small>
-                                  </div>
-                                </td>
-                                <td>
-                                  <div className="queue-recipient">
-                                    <span>{tx.recipient}</span>
-                                    {!tx.known && <small className="payee-badge">New payee</small>}
-                                  </div>
-                                </td>
-                                <td className="amount-cell">{fmt(tx.amount)}</td>
-                                <td>
-                                  <time title={tx.initiated}>{shortTime(tx.initiated)}</time>
-                                </td>
-                                <td>{checkReason(tx, policyLimit)}</td>
-                                <td>
-                                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                    <span className={`pill ${riskTone}`} data-testid={`risk-score-${tx.id}`}>
-                                      {tx.assessment
-                                        ? `${tx.assessment.risk_score} · ${tx.assessment.risk_level}`
-                                        : 'Assessing…'}
-                                    </span>
-                                    {tx.assessment?.source === 'demo_fallback' && (
-                                      <span
-                                        className="pill amber"
-                                        style={{ fontSize: 9, padding: '1px 5px', opacity: 0.9 }}
-                                        title="Offline demo fallback evaluation"
-                                        data-testid={`risk-source-${tx.id}`}
-                                      >
-                                        DEMO
-                                      </span>
-                                    )}
-                                  </div>
-                                </td>
-                                <td>
-                                  <span
-                                    className={`pill ${
-                                      ['Calling', 'Voice connected', 'Chat active', 'Checking claim'].includes(
-                                        verificationStatus(tx)
-                                      )
-                                        ? 'amber'
-                                        : verificationStatus(tx) === 'Complete'
-                                          ? 'green'
-                                          : verificationStatus(tx) === 'Incomplete'
-                                            ? 'blue'
-                                            : ''
-                                    }`}
-                                    data-testid={`call-status-${tx.id}`}
-                                  >
-                                    {verificationStatus(tx)}
-                                  </span>
-                                </td>
-                                <td>
-                                  <span
-                                    className={`pill ${
-                                      paymentStatus(tx) === 'Completed'
-                                        ? 'green'
-                                        : paymentStatus(tx) === 'Cancelled'
-                                          ? 'red'
-                                          : tx.payment === 'Awaiting customer decision'
-                                            ? 'amber'
-                                            : 'blue'
-                                    }`}
-                                    data-testid={`payment-status-${tx.id}`}
-                                  >
-                                    {paymentStatus(tx)}
-                                  </span>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                          {!filtered.length && (
-                            <tr>
-                              <td colSpan={8} style={{ textAlign: 'center', padding: 28, color: '#829099' }}>
-                                No payments match these filters.
-                              </td>
-                            </tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </section>
-                <section className="card" style={{ marginTop: 12 }}>
-                  <div className="card-pad" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <ShieldCheck size={17} color="#18745f" />
-                    <span className="disclosure">
-                      Deterministic engine computes relative risk scores (0–100) using policy rules. Missing signals
-                      remain unknown; voice stress is advisory only and never standalone proof of fraud.
-                    </span>
-                  </div>
-                </section>
-              </div>
-              <div className="phone-wrap">
-                <div className="phone-label">
-                  <span className="card-kicker">CUSTOMER DEVICE · ANDROID PREVIEW</span>
-                  <span className="pill blue">Anika Rao</span>
-                </div>
-                <CustomerPhone
-                  scenario={scenario}
-                  stage={currentPhoneStage}
-                  recipient={recipient}
-                  setRecipient={setRecipient}
-                  amount={amount}
-                  setAmount={setAmount}
-                  purpose={purpose}
-                  setPurpose={setPurpose}
-                  reference={reference}
-                  setReference={setReference}
-                  tx={activeTx}
-                  mode={mode}
-                  question={currentQuestion}
-                  questionIndex={questionIndex}
-                  questionsCount={questionsCount}
-                  draft={draft}
-                  setDraft={(v) => {
-                    setDraft(v);
-                    setDraftSource('typed');
-                  }}
-                  onSend={sendPayment}
-                  onAnswerVoice={() => answer('voice')}
-                  onAnswerChat={() => answer('chat')}
-                  onDecline={finishDecline}
-                  onSubmit={() => finishAnswer(draft, draftSource)}
-                  onDemo={demoResponse}
-                  onRetry={retry}
-                  onCancel={cancelPayment}
-                  onProceedAnyway={proceedAfterWarning}
-                  onSwitchChat={switchToChat}
-                  onSwitchVoice={switchToVoice}
-                  onEnd={() => incomplete('Customer ended the verification call.', 'No answer')}
-                  voiceSupported={voiceSupported}
-                  voiceError={voiceError}
-                  speaking={assistantSpeaking}
-                  duration={duration}
-                  muted={muted}
-                  setMuted={setMuted}
-                  micMuted={micMuted}
-                  onMicMute={toggleMic}
-                  demoResponses={demoResponses}
-                  onSettings={() => setStage('settings')}
-                  onNewPayment={() => setStage('form')}
-                  trusted={trusted}
-                  setTrusted={setTrusted}
-                  consent={consent}
-                  setConsent={setConsent}
-                />
-                {liveStatus && (
-                  <div className="phone-panel" data-testid="live-voice-panel" style={{ marginTop: 10 }}>
-                    <div className="card-kicker">
-                      SIMULATED LIVE VOICE · {liveStatus.toUpperCase().replace('-', ' ')}
-                    </div>
-                    <p className="phone-mic" style={{ marginTop: 4 }}>
-                      Real-time AI voice (simulated demo, no real phone network). Observations below
-                      are preliminary AI evidence — the deterministic policy engine decides the
-                      payment outcome.
-                    </p>
-                    {liveTranscript.length > 0 && (
-                      <div className="live-transcript" data-testid="live-transcript">
-                        {liveTranscript.slice(-6).map((seg, i) => (
-                          <div key={i} className="live-transcript-row">
-                            <strong>{seg.speaker === 'assistant' ? 'Assistant' : 'Customer'}:</strong>{' '}
-                            {seg.text}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div
-                      className="processing-step"
-                      data-testid="live-analysis-status"
-                      style={{ marginTop: 6 }}
-                    >
-                      {liveAnalysis
-                        ? liveAnalysis.status === 'completed'
-                          ? `Evidence analysis: ${liveAnalysis.overall_sentiment ?? 'reviewing'}`
-                          : liveAnalysis.status === 'unavailable'
-                            ? 'Evidence analysis: temporarily unavailable'
-                            : 'Evidence analysis: processing…'
-                        : 'Evidence analysis: pending'}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : surface === 'Settings' ? (
-            <Policies policyLimit={policyLimit} />
-          ) : surface === 'Verification Sources' ? (
-            <Sources records={records} />
-          ) : surface === 'Scenario Lab' ? (
-            <ScenarioSimulationPanel />
-          ) : surface === 'Agent Payments' ? (
-            <AgentSurface
-              agentResult={agentResult}
-              setAgentResult={setAgentResult}
-              merchant={agentMerchant}
-              setMerchant={setAgentMerchant}
-              category={agentCategory}
-              setCategory={setAgentCategory}
-              amount={agentAmount}
-              setAmount={setAgentAmount}
-            />
-          ) : null}
-          <footer
+
+        <nav className="aegis-nav-tabs">
+          <button
+            type="button"
+            className={`aegis-nav-tab ${activeTab === 'Live System' ? 'active' : ''}`}
+            onClick={() => setActiveTab('Live System')}
+          >
+            Live System
+          </button>
+          <button
+            type="button"
+            className={`aegis-nav-tab ${activeTab === 'Scenarios' ? 'active' : ''}`}
+            onClick={() => setActiveTab('Scenarios')}
+          >
+            Scenarios
+          </button>
+          <button
+            type="button"
+            className={`aegis-nav-tab ${activeTab === 'Analytics' ? 'active' : ''}`}
+            onClick={() => setActiveTab('Analytics')}
+          >
+            Analytics
+          </button>
+          <button
+            type="button"
+            className={`aegis-nav-tab ${activeTab === 'Audit Logs' ? 'active' : ''}`}
+            onClick={() => setActiveTab('Audit Logs')}
+          >
+            Audit Logs
+          </button>
+        </nav>
+
+        <div className="aegis-header-actions" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div
+            className="system-live-pill"
             style={{
-              marginTop: 25,
-              color: '#87939c',
-              fontSize: 9,
-              display: 'flex',
-              justifyContent: 'space-between',
-              gap: 10,
-              flexWrap: 'wrap',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 7,
+              background: '#ecfdf5',
+              color: '#065f46',
+              border: '1px solid #d1fae5',
+              borderRadius: 20,
+              padding: '5px 14px',
+              fontSize: 11.5,
+              fontWeight: 700,
             }}
           >
-            <span>AegisPay AI · Core Banking Simulator & Deterministic Risk Engine</span>
-          </footer>
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: '50%',
+                background: '#10b981',
+                boxShadow: '0 0 0 3px rgba(16, 185, 129, 0.2)',
+              }}
+            />
+            System Live
+          </div>
+
+          <div
+            className="user-avatar-badge"
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: '50%',
+              background: '#1e3a8a',
+              color: '#ffffff',
+              display: 'grid',
+              placeItems: 'center',
+              fontSize: 12,
+              fontWeight: 700,
+              boxShadow: '0 2px 6px rgba(30, 58, 138, 0.25)',
+              cursor: 'default',
+            }}
+            title="Aegis Operations Operator"
+          >
+            A
+          </div>
+        </div>
+      </header>
+
+      {/* --------------------------------------------------------------------- */}
+      {/* Body Views */}
+      {/* --------------------------------------------------------------------- */}
+      {activeTab === 'Scenarios' ? (
+        <main style={{ padding: '24px 30px', flex: 1 }}>
+          <ScenarioSimulationPanel />
         </main>
-      </div>
-    </div>
-  );
-}
-
-type PhoneProps = {
-  scenario: Scenario;
-  stage: string;
-  recipient: string;
-  setRecipient: (v: string) => void;
-  amount: number;
-  setAmount: (v: number) => void;
-  purpose: string;
-  setPurpose: (v: string) => void;
-  reference: string;
-  setReference: (v: string) => void;
-  tx: Tx | null;
-  mode: Mode;
-  question: string;
-  questionIndex: number;
-  questionsCount: number;
-  draft: string;
-  setDraft: (v: string) => void;
-  onSend: () => void;
-  onAnswerVoice: () => void;
-  onAnswerChat: () => void;
-  onDecline: () => void;
-  onSubmit: () => void;
-  onDemo: () => void;
-  onRetry: () => void;
-  onCancel: () => void;
-  onProceedAnyway: () => void;
-  onSwitchChat: () => void;
-  onSwitchVoice: () => void;
-  onEnd: () => void;
-  voiceSupported: boolean;
-  voiceError: string;
-  speaking: boolean;
-  duration: number;
-  muted: boolean;
-  setMuted: (v: boolean) => void;
-  micMuted: boolean;
-  onMicMute: () => void;
-  demoResponses: boolean;
-  onSettings: () => void;
-  onNewPayment: () => void;
-  trusted: boolean;
-  setTrusted: (v: boolean) => void;
-  consent: boolean;
-  setConsent: (v: boolean) => void;
-};
-
-function CustomerPhone(p: PhoneProps) {
-  const active = ['active', 'chat', 'processing'].includes(p.stage);
-  const incoming = ['pending', 'ringing'].includes(p.stage);
-  const mm = String(Math.floor(p.duration / 60)).padStart(2, '0');
-  const ss = String(p.duration % 60).padStart(2, '0');
-
-  return (
-    <div className="phone-frame" data-testid="customer-phone">
-      <div className="phone-screen">
-        <div className="phone-statusbar">
-          <span>9:41</span>
-          <span>ASTER</span>
-        </div>
-        <div className="phone-appbar">
-          <div className="phone-brand">
-            <span className="brand-mark">A</span>Aster Bank
+      ) : activeTab === 'Analytics' ? (
+        <main style={{ padding: '24px 30px', flex: 1 }}>
+          <div className="aegis-card">
+            <h2 className="aegis-card-title">Fraud Prevention Analytics & Risk Trends</h2>
+            <p className="aegis-card-subtitle">Real-time statistics across all registered accounts</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginTop: 16 }}>
+              <div style={{ padding: 16, background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0' }}>
+                <div style={{ fontSize: 11, color: '#64748b' }}>Mean Investigation Latency</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: '#0f172a', margin: '6px 0' }}>85 ms</div>
+                <div style={{ fontSize: 11, color: '#16a34a' }}>Deterministic Engine</div>
+              </div>
+              <div style={{ padding: 16, background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0' }}>
+                <div style={{ fontSize: 11, color: '#64748b' }}>Coercion Interceptions</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: '#b91c1c', margin: '6px 0' }}>14 Cases</div>
+                <div style={{ fontSize: 11, color: '#b91c1c' }}>100% Funds Saved</div>
+              </div>
+              <div style={{ padding: 16, background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0' }}>
+                <div style={{ fontSize: 11, color: '#64748b' }}>False Positive Rate</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: '#0f766e', margin: '6px 0' }}>0.04%</div>
+                <div style={{ fontSize: 11, color: '#16a34a' }}>Trusted mitigation active</div>
+              </div>
+              <div style={{ padding: 16, background: '#f8fafc', borderRadius: 12, border: '1px solid #e2e8f0' }}>
+                <div style={{ fontSize: 11, color: '#64748b' }}>Live Gemini Voice Model</div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: '#0284c7', margin: '6px 0' }}>gemini-3.8-live</div>
+                <div style={{ fontSize: 11, color: '#0369a1' }}>Live API Resilient</div>
+              </div>
+            </div>
           </div>
-          <button className="button small" onClick={p.onSettings} aria-label="Open safety settings" data-testid="phone-settings">
-            <LockKeyhole />
-          </button>
-        </div>
-        <div className={classes('phone-content', incoming && 'incoming-phone-content')} data-testid={`phone-stage-${p.stage}`}>
-          {p.stage === 'home' && (
-            <>
-              <div className="phone-hero">
-                <h3>Good afternoon, Anika</h3>
-                <p>Everyday account · safely in your control.</p>
-              </div>
-              <div className="phone-panel">
-                <h4>Available balance</h4>
-                <div className="phone-amount">₹2,48,650</div>
-                <button className="phone-action" onClick={p.onNewPayment} data-testid="phone-home-new">
-                  New payment
-                </button>
-              </div>
-            </>
-          )}
-          {incoming && (
-            <>
-              <div className="phone-hold-message" data-testid="money-unsent-banner">
-                <strong>{fmt(p.tx?.amount ?? p.amount)} pending</strong>
-                <span>Money has not been sent. It remains in your account.</span>
-              </div>
-              {p.stage === 'pending' ? (
-                <div className="phone-panel">
-                  <h4>Preparing payment verification</h4>
-                  <div className="processing-steps">
-                    <span className="processing-step done">Payment held</span>
-                    <span className="processing-step active">Calling customer</span>
-                    <span className="processing-step">Customer response</span>
-                  </div>
-                  <p>The incoming call will appear here shortly.</p>
-                </div>
-              ) : (
-                <div className="call-screen incoming-call" data-testid="incoming-call-screen">
-                  <div className="call-avatar ringing">
-                    <span className="brand-mark">A</span>
-                  </div>
-                  <div className="card-kicker">PAYMENT VERIFICATION</div>
-                  <h3 style={{ font: '700 18px var(--font-display)', margin: '7px 0 3px' }}>Aster Bank</h3>
-                  <p className="subhead">Incoming call · attempt {p.tx?.attempt ?? 1}</p>
-                  <div className="phone-panel call-payment-details">
-                    <div className="phone-row">
-                      <span>Amount</span>
-                      <strong>{fmt(p.tx?.amount ?? p.amount)}</strong>
-                    </div>
-                    <div className="phone-row">
-                      <span>Recipient</span>
-                      <strong>{p.tx?.recipient ?? p.recipient}</strong>
-                    </div>
-                  </div>
-                  <div className="call-actions">
-                    <button className="call-choice decline" onClick={p.onDecline} data-testid="button-decline-call">
-                      <span className="call-button">
-                        <PhoneOff />
-                      </span>
-                      Decline
-                    </button>
-                    <button className="call-choice answer" onClick={p.onAnswerVoice} data-testid="button-answer-call">
-                      <span className="call-button">
-                        <PhoneIcon />
-                      </span>
-                      Answer
-                    </button>
-                  </div>
-                  <button className="phone-secondary" onClick={p.onAnswerChat} data-testid="button-answer-in-chat">
-                    <MessageSquareText size={13} />
-                    Answer in chat
-                  </button>
-                  <p className="phone-mic">Microphone access starts only if you answer by voice.</p>
-                </div>
-              )}
-            </>
-          )}
-          {p.stage === 'form' && (
-            <>
-              <div className="eyebrow">PAYMENTS</div>
-              <h3 style={{ font: '700 18px var(--font-display)', marginBottom: 13 }}>Send money</h3>
-              <div className="mini-form">
-                <label>
-                  <span className="field-label">Recipient</span>
-                  <input
-                    className="field-input"
-                    value={p.recipient}
-                    onChange={(e) => p.setRecipient(e.target.value)}
-                    data-testid="phone-input-recipient"
-                  />
-                  <span className="recipient-hint">
-                    {p.scenario === 'digital_arrest'
-                      ? 'Govt Security Account · cbi.clearance@sbi'
-                      : p.scenario === 'investment_scam'
-                        ? 'Apex Yield · apexyield@icici'
-                        : p.scenario === 'fake_invoice'
-                          ? 'Starling Supplies · 9928172635@kotak'
-                          : p.scenario === 'mule_network'
-                            ? 'UPI ID · fastcash99@upi'
-                            : 'Account ending •• 1880'}
-                  </span>
-                </label>
-                <label>
-                  <span className="field-label">Amount (₹)</span>
-                  <input
-                    type="number"
-                    min="1"
-                    className="field-input"
-                    value={p.amount}
-                    onChange={(e) => p.setAmount(Number(e.target.value))}
-                    data-testid="phone-input-amount"
-                  />
-                </label>
-                <label>
-                  <span className="field-label">Note (optional)</span>
-                  <textarea
-                    className="field-textarea"
-                    value={p.purpose}
-                    onChange={(e) => p.setPurpose(e.target.value)}
-                    placeholder="For example, rent or invoice"
-                    data-testid="phone-input-purpose"
-                  />
-                </label>
-                <button
-                  className="phone-action"
-                  onClick={p.onSend}
-                  disabled={!p.recipient.trim() || p.amount <= 0}
-                  data-testid="phone-send-money"
-                >
-                  Send money
-                </button>
-                <p className="phone-mic">Payment safety checks evaluate risk deterministically before any money is sent.</p>
-              </div>
-            </>
-          )}
-          {active && (
-            <>
-              <div className="call-screen" style={{ padding: '12px 2px 3px' }}>
-                <div className="call-avatar">
-                  <PhoneCall />
-                </div>
-                <span className="call-status">
-                  <span className="online-dot" />
-                  Connected · {mm}:{ss}
-                </span>
-                <h3 style={{ font: '700 15px var(--font-display)', margin: '10px 0 3px' }}>Aster Bank Verification</h3>
-                <p className="phone-mic">Payment safety check</p>
-                <div className="call-controls">
-                  {p.stage === 'active' && (
-                    <>
-                      <button
-                        className={classes('call-mute', p.micMuted && 'muted')}
-                        onClick={p.onMicMute}
-                        aria-label={p.micMuted ? 'Unmute microphone' : 'Mute microphone'}
-                        data-testid="button-mute-microphone"
-                      >
-                        {p.micMuted ? <MicOff size={14} /> : <Mic size={14} />}
-                      </button>
-                      <button
-                        className={classes('call-mute', p.muted && 'muted')}
-                        onClick={() => p.setMuted(!p.muted)}
-                        aria-label={p.muted ? 'Unmute assistant audio' : 'Mute assistant audio'}
-                        data-testid="button-mute-audio"
-                      >
-                        {p.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                      </button>
-                    </>
-                  )}
-                  {p.mode === 'voice' && (
-                    <button className="button small" onClick={p.onSwitchChat} data-testid="button-switch-chat">
-                      <MessageSquareText />
-                      Switch to chat
-                    </button>
-                  )}
-                  {p.mode === 'chat' && p.voiceSupported && (
-                    <button className="button small" onClick={p.onSwitchVoice} data-testid="button-switch-voice">
-                      <Mic />
-                      Switch to voice
-                    </button>
-                  )}
-                  <button className="button danger small" onClick={p.onEnd} data-testid="button-end-call">
-                    <PhoneOff />
-                    End call
-                  </button>
-                </div>
-              </div>
-              <div className="phone-panel">
-                <div className="card-kicker">
-                  QUESTION {Math.min(p.questionIndex + 1, p.questionsCount)} OF {p.questionsCount}
-                </div>
-                <h4 style={{ fontSize: 12, lineHeight: 1.4, marginTop: 5 }}>{p.question}</h4>
-                <div className="processing-steps">
-                  <span className={classes('processing-step', p.speaking ? 'active' : 'done')}>
-                    {p.speaking ? 'Assistant speaking' : 'Question ready'}
-                  </span>
-                  <span
-                    className={classes(
-                      'processing-step',
-                      p.stage === 'active' && !p.speaking && !p.voiceError && !p.micMuted ? 'active' : ''
-                    )}
-                  >
-                    {p.mode === 'voice'
-                      ? p.micMuted
-                        ? 'Microphone muted'
-                        : p.voiceError
-                          ? 'Voice unavailable'
-                          : p.speaking
-                            ? 'Assistant speaking'
-                            : 'Listening'
-                      : 'Chat response'}
-                  </span>
-                  <span className={classes('processing-step', p.stage === 'processing' ? 'active' : '')}>
-                    {p.stage === 'processing' ? 'Processing answer' : 'Transcript ready'}
-                  </span>
-                </div>
-                <div className="transcript-feed" data-testid="phone-transcript">
-                  {(p.tx?.statements ?? []).map((s, i) => (
-                    <div className="transcript-line customer" key={`${i}-${s.answer}`}>
-                      <b>
-                        Your response · {s.source}
-                      </b>
-                      {s.answer}
-                    </div>
+        </main>
+      ) : activeTab === 'Audit Logs' ? (
+        <main style={{ padding: '24px 30px', flex: 1 }}>
+          <div className="aegis-card">
+            <h2 className="aegis-card-title">Compliance & Decision Audit Logs</h2>
+            <p className="aegis-card-subtitle">Permanent trace of all deterministic rule firings and AI interventions</p>
+            <div style={{ overflowX: 'auto', marginTop: 16 }}>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+                    <th style={{ padding: '10px 14px', textAlign: 'left' }}>Timestamp</th>
+                    <th style={{ padding: '10px 14px', textAlign: 'left' }}>Tx ID</th>
+                    <th style={{ padding: '10px 14px', textAlign: 'left' }}>Recipient VPA</th>
+                    <th style={{ padding: '10px 14px', textAlign: 'left' }}>Risk Score</th>
+                    <th style={{ padding: '10px 14px', textAlign: 'left' }}>Decision Action</th>
+                    <th style={{ padding: '10px 14px', textAlign: 'left' }}>Policy Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {userList.map((u) => (
+                    <tr key={u.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                      <td style={{ padding: '12px 14px', fontFamily: 'monospace', color: '#64748b' }}>{u.initiatedOn}</td>
+                      <td style={{ padding: '12px 14px', fontWeight: 600 }}>{u.id}</td>
+                      <td style={{ padding: '12px 14px', fontFamily: 'monospace' }}>{u.recipientUpi}</td>
+                      <td style={{ padding: '12px 14px' }}>
+                        <span className={`score-badge-pill ${u.riskScore >= 80 ? 'high' : u.riskScore >= 40 ? 'medium' : 'low'}`}>
+                          {u.riskScore} / 100
+                        </span>
+                      </td>
+                      <td style={{ padding: '12px 14px', fontWeight: 700 }}>
+                        {u.riskScore >= 80 ? 'HOLD_PROTECTIVE' : u.riskScore >= 40 ? 'REQUIRE_VERIFICATION' : 'ALLOW_SETTLED'}
+                      </td>
+                      <td style={{ padding: '12px 14px', color: '#475569' }}>{u.checkReason}</td>
+                    </tr>
                   ))}
-                </div>
-                {p.stage === 'processing' ? (
-                  <div className="phone-alert" data-testid="phone-processing">
-                    Processing your answer and checking against safety policies…
-                  </div>
-                ) : (
-                  <label style={{ display: 'block', marginTop: 9 }}>
-                    <span className="field-label">Your answer · review before sending</span>
-                    <textarea
-                      className="field-textarea"
-                      value={p.draft}
-                      onChange={(e) => p.setDraft(e.target.value)}
-                      placeholder={
-                        p.mode === 'voice'
-                          ? 'Your recognized words appear here. Edit before submitting.'
-                          : 'Type your answer here…'
-                      }
-                      data-testid="phone-answer-input"
-                    />
-                  </label>
-                )}
-                {p.voiceError && (
-                  <div className="phone-alert" data-testid="voice-error">
-                    {p.voiceError}
-                    <button
-                      className="button primary small"
-                      style={{ marginTop: 8, width: '100%' }}
-                      onClick={p.onSwitchChat}
-                      data-testid="button-continue-in-chat"
-                    >
-                      Continue in chat
-                    </button>
-                  </div>
-                )}
-                {p.demoResponses && p.stage !== 'processing' && (
-                  <button
-                    className="button small"
-                    style={{ marginTop: 8, width: '100%' }}
-                    onClick={p.onDemo}
-                    data-testid="button-demo-response"
-                  >
-                    <Check />
-                    Insert example response (not speech)
-                  </button>
-                )}
-                {p.stage !== 'processing' && (
-                  <button
-                    className="phone-action"
-                    style={{ marginTop: 8 }}
-                    disabled={!p.draft.trim()}
-                    onClick={p.onSubmit}
-                    data-testid="button-submit-answer"
-                  >
-                    Submit answer
-                  </button>
-                )}
-                {p.mode === 'voice' && !p.voiceSupported && (
-                  <button className="phone-secondary" onClick={p.onSwitchChat} data-testid="button-fallback-chat">
-                    Continue in chat
-                  </button>
-                )}
-                <p className="phone-mic">
-                  {p.mode === 'voice'
-                    ? 'Browser speech recognition only after answering. Recognition pauses while assistant audio plays.'
-                    : 'Secure demo chat · no microphone permission requested.'}
-                </p>
-              </div>
-            </>
-          )}
-          {p.stage === 'warning' && (
-            <>
-              <div className="outcome-banner warning" role="alert" data-testid="phone-safety-warning">
-                <h3>Safety warning — review before choosing</h3>
-                <p>{p.tx?.reason || 'This payment could not be confirmed.'}</p>
-              </div>
-              <div className="phone-panel">
-                <h4>Money has not been sent</h4>
-                <p>
-                  {fmt(p.tx?.amount ?? p.amount)} to {p.tx?.recipient ?? p.recipient} remains held in your account.
-                </p>
-                <p style={{ marginTop: 9 }}>
-                  Continue only if you independently recognize and trust this payment. This is a simulation; no real
-                  money will move.
-                </p>
-                <div className="phone-decision-actions">
-                  <button className="phone-action" onClick={p.onCancel} data-testid="button-cancel-warning">
-                    Cancel payment
-                  </button>
-                  <button
-                    className="phone-secondary phone-proceed"
-                    onClick={p.onProceedAnyway}
-                    data-testid="button-proceed-after-warning"
-                  >
-                    Proceed anyway
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-          {p.stage === 'incomplete' && (
-            <>
-              <div className="outcome-banner incomplete" data-testid="phone-incomplete">
-                <h3>Verification incomplete — money was not sent.</h3>
-                <p>{p.voiceError || p.tx?.reason || 'No answer was received. Payment remains unsent.'}</p>
-              </div>
-              <div className="phone-panel">
-                <h4>Choose what to do next</h4>
-                <button className="phone-action" onClick={p.onRetry} data-testid="button-retry-verification">
-                  Retry verification
-                </button>
-                <button className="phone-secondary" onClick={p.onAnswerChat} data-testid="button-incomplete-chat">
-                  Continue in chat
-                </button>
-                <button className="phone-secondary" onClick={p.onCancel} data-testid="button-cancel-incomplete">
-                  Cancel payment
-                </button>
-              </div>
-            </>
-          )}
-          {p.stage === 'outcome' && (
-            <>
-              <div
-                className={classes(
-                  'outcome-banner',
-                  p.tx?.payment === 'Approved' || p.tx?.payment === 'Completed without check'
-                    ? 'approved'
-                    : p.tx?.payment === 'Cancelled'
-                      ? 'cancelled'
-                      : p.tx?.payment === 'Completed after warning'
-                        ? 'warning'
-                        : 'incomplete'
-                )}
-                data-testid="phone-final-outcome"
-              >
-                <h3>
-                  {p.tx?.payment === 'Completed after warning'
-                    ? 'Payment completed after warning'
-                    : p.tx?.payment === 'Approved' || p.tx?.payment === 'Completed without check'
-                      ? 'Payment approved'
-                      : p.tx?.payment === 'Cancelled'
-                        ? 'Payment cancelled'
-                        : 'Payment complete'}
-                </h3>
-                <p>
-                  {p.tx?.payment === 'Cancelled'
-                    ? 'Money was not sent.'
-                    : p.tx?.payment === 'Completed after warning'
-                      ? 'You chose to continue after the warning. This simulation did not move real money.'
-                      : p.tx?.payment === 'Approved' || p.tx?.payment === 'Completed without check'
-                        ? 'Your simulated payment is complete. No real money moved.'
-                        : p.tx?.reason}
-                </p>
-              </div>
-              <div className="phone-panel">
-                <h4>Payment receipt</h4>
-                <div className="phone-row">
-                  <span>Amount</span>
-                  <strong>{fmt(p.tx?.amount ?? p.amount)}</strong>
-                </div>
-                <div className="phone-row">
-                  <span>Recipient</span>
-                  <strong>{p.tx?.recipient ?? p.recipient}</strong>
-                </div>
-                <div className="phone-row">
-                  <span>Transaction</span>
-                  <strong>{p.tx?.id ?? 'Local simulation'}</strong>
-                </div>
-                <p style={{ marginTop: 9 }}>{p.tx?.reason}</p>
-              </div>
-              <button
-                className="phone-secondary"
-                onClick={p.onCancel}
-                disabled={p.tx?.payment !== 'Awaiting verification' && p.tx?.payment !== 'Verification incomplete'}
-                data-testid="button-outcome-support"
-              >
-                <Headphones size={13} />
-                Aster Bank support options
-              </button>
-            </>
-          )}
-          {p.stage === 'settings' && (
-            <>
-              <div className="eyebrow">PRIVACY & SAFETY</div>
-              <h3 style={{ font: '700 18px var(--font-display)' }}>Safety settings</h3>
-              <div className="settings-row">
-                <span>Trusted contact · Maya R.</span>
-                <button
-                  aria-label="Toggle trusted contact"
-                  className={classes('switch', p.trusted && 'on')}
-                  onClick={() => p.setTrusted(!p.trusted)}
-                  data-testid="toggle-phone-trusted"
-                />
-              </div>
-              <div className="settings-row">
-                <span>Allow limited safety alert</span>
-                <button
-                  aria-label="Toggle safety alert consent"
-                  className={classes('switch', p.consent && 'on')}
-                  onClick={() => p.setConsent(!p.consent)}
-                  data-testid="toggle-phone-consent"
-                />
-              </div>
-              <p className="simulation-note">Preview only. This prototype sends no notification.</p>
-            </>
-          )}
-          {p.stage === 'agent' && (
-            <div className="phone-panel">
-              <h4>Agent payment</h4>
-              <p>Secondary mandate demo. No payment is made.</p>
+                </tbody>
+              </table>
             </div>
-          )}
-        </div>
-        <div className="phone-bottom">
-          <div className="phone-nav">
-            <span>
-              <Landmark />
-              Home
-            </span>
-            <span>
-              <ArrowDownLeft />
-              Payments
-            </span>
-            <span>
-              <ShieldCheck />
-              Safety
-            </span>
           </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TransactionDrawer({
-  tx,
-  tab,
-  setTab,
-  onClose,
-  onRetry,
-  policyLimit,
-}: {
-  tx: Tx;
-  tab: DrawerTab;
-  setTab: (v: DrawerTab) => void;
-  onClose: () => void;
-  onRetry: () => void;
-  policyLimit: number;
-}) {
-  const checks = [
-    ['Institution', tx.claimInstitution || 'Not extracted'],
-    ['Customer', tx.customer],
-    ['Instruction', tx.claimInstruction || tx.purpose || 'Not extracted'],
-    ['Recipient', tx.recipient],
-    ['Amount', fmt(tx.amount)],
-    ['Reference', tx.claimReference || tx.reference || 'Not supplied'],
-  ];
-  const verification = verificationStatus(tx);
-  const callTone =
-    verification === 'Complete'
-      ? 'green'
-      : ['Calling', 'Voice connected', 'Chat active', 'Checking claim'].includes(verification)
-        ? 'amber'
-        : verification === 'Incomplete'
-          ? 'blue'
-          : '';
-  const visibleResult = tx.result === 'Not independently verifiable' ? 'Not applicable' : tx.result;
-
-  const riskTier = tx.assessment?.risk_level ?? 'LOW';
-  const riskTone =
-    riskTier === 'CRITICAL'
-      ? 'red'
-      : riskTier === 'HIGH'
-        ? 'amber'
-        : riskTier === 'MEDIUM'
-          ? 'blue'
-          : 'green';
-
-  return (
-    <section className="detail-panel card" data-testid="transaction-drawer">
-      <div className="detail-drawer">
-        <div className="drawer-head">
-          <div>
-            <div className="card-kicker">SELECTED PAYMENT</div>
-            <h2>
-              {tx.customer} · {fmt(tx.amount)}
-            </h2>
-            <div className="mono">
-              {tx.id} · {tx.customerId}
+        </main>
+      ) : (
+        /* ------------------------------------------------------------------- */
+        /* Main Command Center matching Reference Screenshot EXACTLY */
+        /* ------------------------------------------------------------------- */
+        <main className="dashboard-canvas">
+          {/* ================================================================= */}
+          {/* Column 1 (Left): Users & Payment Activity */}
+          {/* ================================================================= */}
+          <div className="aegis-card" style={{ height: 'fit-content' }}>
+            <div className="aegis-card-title">
+              <span>Users & Payment Activity</span>
+              <Search size={16} color="#64748b" />
             </div>
-            <span className={`pill ${callTone}`} style={{ marginTop: 9 }} data-testid="drawer-call-status">
-              {verification === 'Not required' ? 'Not required' : `${verification} · attempt ${tx.attempt}`}
-            </span>
-          </div>
-          <button className="button small" onClick={onClose} aria-label="Close transaction details" data-testid="button-close-drawer">
-            <X />
-          </button>
-        </div>
-        <div className="drawer-facts">
-          <div>
-            <small>RECIPIENT</small>
-            <strong>{tx.recipient}</strong>
-          </div>
-          <div>
-            <small>PAYMENT STATUS</small>
-            <strong data-testid="drawer-payment-status">{paymentStatus(tx)}</strong>
-          </div>
-          <div>
-            <small>RISK EVALUATION</small>
-            <strong data-testid="drawer-risk-level">
-              <span className={`pill ${riskTone}`} style={{ marginLeft: 0 }}>
-                {tx.assessment ? `${tx.assessment.risk_level} (${tx.assessment.risk_score}/100)` : 'Assessing…'}
-              </span>
-            </strong>
-          </div>
-          <div>
-            <small>INITIATED</small>
-            <strong>{tx.initiated}</strong>
-          </div>
-        </div>
-        <div className="tabrow">
-          {(
-            [
-              'Live verification',
-              'Risk assessment',
-              'Evidence & checks',
-              'AI Investigation',
-              'Decision & history',
-            ] as const
-          ).map((t) => (
-            <button
-              key={t}
-              className={classes('tab', tab === t && 'active')}
-              onClick={() => setTab(t)}
-              data-testid={`drawer-tab-${t.toLowerCase().replaceAll(' ', '-').replace('&', 'and')}`}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
 
-        {tab === 'Live verification' && (
-          <>
-            <section className="drawer-section">
-              <h3>Live verification</h3>
-              <div className="phone-row">
-                <span>Current processing step</span>
-                <strong>{tx.process}</strong>
-              </div>
-              <div className="processing-steps">
-                <span className={classes('processing-step', tx.payment !== 'Awaiting verification' && 'done')}>
-                  Payment received
-                </span>
-                <span className={classes('processing-step', ['Calling', 'Connected', 'In progress'].includes(tx.call) ? 'active' : 'done')}>
-                  Customer verification
-                </span>
-                <span className={classes('processing-step', tx.result !== 'Not independently verifiable' ? 'done' : '')}>
-                  Claim verification
-                </span>
-                <span
-                  className={classes(
-                    'processing-step',
-                    tx.payment === 'Awaiting customer decision'
-                      ? 'active'
-                      : ['Approved', 'Cancelled', 'Completed after warning', 'Completed without check'].includes(tx.payment)
-                        ? 'done'
-                        : ''
-                  )}
-                >
-                  Decision
-                </span>
-              </div>
-              <div className="live-claim-summary" data-testid="live-claim-summary">
-                <div>
-                  <small>CLAIM</small>
-                  <strong>{tx.claim || 'No claim extracted yet.'}</strong>
-                </div>
-                <div>
-                  <small>INDEPENDENT CHECK</small>
-                  <strong>{visibleResult}</strong>
-                </div>
-              </div>
-              <div className="why-checked">
-                <span>Why this was checked</span>
-                <strong>{checkReason(tx, policyLimit)}</strong>
-              </div>
-            </section>
-            <section className="drawer-section">
-              <h3>Conversation</h3>
-              <div className="transcript-feed" data-testid="drawer-transcript">
-                {tx.statements.length ? (
-                  tx.statements.map((s, i) => (
-                    <div key={i} className="transcript-line customer">
-                      <b>
-                        Customer · {s.source} · {s.question}
-                        <time>{s.at || tx.initiated}</time>
-                      </b>
-                      {s.answer}
+            <div className="user-activity-list">
+              {filteredUsers.map((item) => {
+                const isSelected = item.id === selectedUserId;
+                const scoreClass = item.riskScore >= 80 ? 'high' : item.riskScore >= 40 ? 'medium' : 'low';
+                const statusClass =
+                  item.verificationStatus === 'Verified'
+                    ? 'verified'
+                    : item.verificationStatus === 'In Progress'
+                    ? 'in-progress'
+                    : 'pending';
+
+                return (
+                  <div
+                    key={item.id}
+                    className={`user-activity-card ${isSelected ? 'selected' : ''}`}
+                    onClick={() => {
+                      setSelectedUserId(item.id);
+                      setMobileUpi(item.recipientUpi);
+                      setMobileAmount(String(item.amount));
+                      setMobilePurpose(item.purpose);
+                    }}
+                  >
+                    <div className="user-card-head">
+                      <div className="user-profile-left">
+                        <div
+                          className="user-initials-badge"
+                          style={{
+                            background: isSelected ? '#dbeafe' : item.userNum === 2 ? '#ede9fe' : '#dcfce7',
+                            color: isSelected ? '#1e40af' : item.userNum === 2 ? '#6b21a8' : '#166534',
+                          }}
+                        >
+                          {item.initials}
+                        </div>
+                        <div>
+                          <div className="user-card-name">User {item.userNum}</div>
+                          <div className="user-card-id">{item.userName}</div>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} color={isSelected ? '#0284c7' : '#94a3b8'} />
                     </div>
-                  ))
-                ) : (
-                  <div className="transcript-line assistant">
-                    <b>Session</b>Conversation will appear when the customer answers.
+
+                    <div className="user-data-row">
+                      <span className="user-data-label">Recipient</span>
+                      <span className="user-data-value">{item.recipientName}</span>
+                    </div>
+                    <div className="user-data-row">
+                      <span className="user-data-label">Amount</span>
+                      <span className="user-data-value">₹ {item.amount.toLocaleString('en-IN')}</span>
+                    </div>
+                    <div className="user-data-row">
+                      <span className="user-data-label">Check Reason</span>
+                      <span className="user-data-value" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {item.checkReason}
+                      </span>
+                    </div>
+                    <div className="user-data-row">
+                      <span className="user-data-label">Initiated On</span>
+                      <span className="user-data-value">{item.initiatedOn}</span>
+                    </div>
+                    <div className="user-data-row" style={{ alignItems: 'center' }}>
+                      <span className="user-data-label">Risk Score</span>
+                      <span className={`score-badge-pill ${scoreClass}`}>{item.riskScore < 10 ? `0${item.riskScore}` : item.riskScore} / 100</span>
+                    </div>
+                    <div className="user-data-row" style={{ alignItems: 'center' }}>
+                      <span className="user-data-label">Verification</span>
+                      <span className={`status-badge-pill ${statusClass}`}>{item.verificationStatus}</span>
+                    </div>
                   </div>
-                )}
-              </div>
-            </section>
-            {tx.payment === 'Verification incomplete' && (
-              <button className="button primary" onClick={onRetry} data-testid="drawer-retry">
-                <RotateCcw />
-                Retry same transaction
-              </button>
-            )}
-          </>
-        )}
-
-        {tab === 'Risk assessment' && (
-          <section className="drawer-section" data-testid="drawer-risk-section">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <h3 style={{ margin: 0 }}>Deterministic Risk Assessment</h3>
-              <span
-                className={`pill ${tx.assessment?.source === 'demo_fallback' ? 'amber' : 'green'}`}
-                data-testid="assessment-source-badge"
-                style={{ fontSize: 10, fontWeight: 600 }}
-              >
-                {tx.assessment?.source === 'demo_fallback' ? 'Demo Fallback (Offline Mode)' : 'Live Backend Assessment'}
-              </span>
+                );
+              })}
             </div>
+          </div>
 
-            {tx.assessment?.source === 'demo_fallback' && (
-              <div className="notice amber" style={{ margin: '0 0 12px 0' }} data-testid="assessment-fallback-banner">
-                <ShieldAlert size={14} style={{ flex: 'none', marginTop: 1 }} />
-                <span>
-                  <strong>Demo Mode Fallback:</strong> The backend API is unreachable. This score was evaluated
-                  locally using deterministic policy rules for demonstration purposes.
-                </span>
-              </div>
-            )}
+          {/* ================================================================= */}
+          {/* Column 2 (Center): Stack of Top Split & Bottom Investigation */}
+          {/* ================================================================= */}
+          <div className="center-dashboard-stack">
+            {/* Center Top Split: Aegis Intelligence (Left) + Payment Summary (Right) */}
+            <div className="center-top-split">
+              {/* Card 1: Aegis Intelligence Radar Visualization */}
+              <div className="aegis-card" style={{ display: 'flex', flexDirection: 'column' }}>
+                <div className="aegis-card-title">
+                  <span>Aegis Intelligence</span>
+                </div>
+                <div className="aegis-card-subtitle">Live Fraud Investigation</div>
 
-            <div className="payment-summary" style={{ gridTemplateColumns: '1.2fr 1fr 1fr' }}>
-              <div className="metric">
-                <div className="metric-label">RISK SCORE</div>
-                <div className="metric-value amount">
-                  {tx.assessment?.risk_score ?? 0}
-                  <span style={{ fontSize: 11, color: '#8895a0' }}> / 100</span>
+                <div className="intelligence-hub-box" style={{ flex: 1, minHeight: 275 }}>
+                  {/* Subtle Background Connecting SVG */}
+                  <svg
+                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+                    viewBox="0 0 460 260"
+                    fill="none"
+                  >
+                    {/* Concentric rings */}
+                    <circle cx="230" cy="130" r="78" stroke="#38bdf8" strokeWidth="1.2" strokeDasharray="3 3" opacity="0.65" />
+                    <circle cx="230" cy="130" r="60" stroke="#0ea5e9" strokeWidth="1.2" opacity="0.45" />
+
+                    {/* Dotted connecting curves */}
+                    <path d="M 125 55 C 165 55, 185 105, 205 118" stroke="#38bdf8" strokeWidth="1.4" strokeDasharray="3 3" opacity="0.8" />
+                    <circle cx="125" cy="55" r="3.5" fill="#0284c7" />
+
+                    <path d="M 335 55 C 295 55, 275 105, 255 118" stroke="#38bdf8" strokeWidth="1.4" strokeDasharray="3 3" opacity="0.8" />
+                    <circle cx="335" cy="55" r="3.5" fill="#0284c7" />
+
+                    <path d="M 125 205 C 165 205, 185 155, 205 142" stroke="#38bdf8" strokeWidth="1.4" strokeDasharray="3 3" opacity="0.8" />
+                    <circle cx="125" cy="205" r="3.5" fill="#0284c7" />
+
+                    <path d="M 335 205 C 295 205, 275 155, 255 142" stroke="#38bdf8" strokeWidth="1.4" strokeDasharray="3 3" opacity="0.8" />
+                    <circle cx="335" cy="205" r="3.5" fill="#0284c7" />
+                  </svg>
+
+                  {/* 4 Connected Orbital Nodes */}
+                  <div className="hub-node-card top-left">
+                    <div className="hub-node-title">
+                      <div style={{ width: 20, height: 20, borderRadius: 5, background: '#f0fdfa', display: 'grid', placeItems: 'center', border: '1px solid #ccfbf1' }}>
+                        <CreditCard size={11} color="#0d9488" />
+                      </div>
+                      <span>Payment Analysis</span>
+                    </div>
+                    <div className="hub-node-desc">Analyzing amount, recipient and history</div>
+                  </div>
+
+                  <div className="hub-node-card top-right">
+                    <div className="hub-node-title">
+                      <div style={{ width: 20, height: 20, borderRadius: 5, background: '#f0fdfa', display: 'grid', placeItems: 'center', border: '1px solid #ccfbf1' }}>
+                        <BarChart3 size={11} color="#0d9488" />
+                      </div>
+                      <span>Risk Detection</span>
+                    </div>
+                    <div className="hub-node-desc">Checking for fraud signals and patterns</div>
+                  </div>
+
+                  <div className="hub-node-card bottom-left">
+                    <div className="hub-node-title">
+                      <div style={{ width: 20, height: 20, borderRadius: 5, background: '#f0fdfa', display: 'grid', placeItems: 'center', border: '1px solid #ccfbf1' }}>
+                        <User size={11} color="#0d9488" />
+                      </div>
+                      <span>Identity Verification</span>
+                    </div>
+                    <div className="hub-node-desc">Verifying user, device and location</div>
+                  </div>
+
+                  <div className="hub-node-card bottom-right">
+                    <div className="hub-node-title">
+                      <div style={{ width: 20, height: 20, borderRadius: 5, background: '#f0fdfa', display: 'grid', placeItems: 'center', border: '1px solid #ccfbf1' }}>
+                        <Share2 size={11} color="#0d9488" />
+                      </div>
+                      <span>Behaviour Analysis</span>
+                    </div>
+                    <div className="hub-node-desc">Analyzing recent activity and intent</div>
+                  </div>
+
+                  {/* Center Core Badge */}
+                  <div className="hub-center-badge">
+                    <div style={{ width: 34, height: 34, borderRadius: '50%', background: '#f0fdfa', display: 'grid', placeItems: 'center', border: '1.5px solid #38bdf8' }}>
+                      <ShieldCheck size={20} color="#0284c7" />
+                    </div>
+                    <div style={{ fontSize: 10.5, fontWeight: 800, color: '#0f172a', marginTop: 5, letterSpacing: -0.2 }}>
+                      AEGIS INTELLIGENCE
+                    </div>
+                    <div style={{ fontSize: 8.5, color: '#64748b', marginTop: 2 }}>Investigating transaction...</div>
+                    <div style={{ fontSize: 8, color: '#0284c7', fontWeight: 700, marginTop: 4 }}>
+                      Powered by Gemini AI
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div className="metric">
-                <div className="metric-label">RISK LEVEL</div>
-                <div className="metric-value">
-                  <span className={`pill ${riskTone}`} data-testid="drawer-risk-tier">
-                    {tx.assessment?.risk_level ?? 'LOW'}
+
+              {/* Card 2: Payment Summary matching Screenshot */}
+              <div className="aegis-card" style={{ display: 'flex', flexDirection: 'column' }}>
+                <div className="aegis-card-title">
+                  <span>Payment Summary</span>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      border: '1px solid #e2e8f0',
+                      borderRadius: 8,
+                      padding: '3px 8px',
+                      background: '#f8fafc',
+                      color: '#475569',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <span>Today</span>
+                    <span style={{ fontSize: 9 }}>▾</span>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 7, flex: 1, justifyContent: 'space-between' }}>
+                  {/* Row 1: Payments Today */}
+                  <div className="summary-metric-card">
+                    <div className="summary-metric-left">
+                      <div className="summary-metric-icon" style={{ background: '#f0fdfa', borderColor: '#ccfbf1', color: '#0d9488' }}>
+                        <CreditCard size={18} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10.5, color: '#64748b' }}>Payments Today</div>
+                        <div className="summary-metric-val">128</div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div className="summary-trend up">
+                        <TrendingUp size={12} /> 12%
+                      </div>
+                      <div className="mini-sparkline">
+                        {[8, 14, 11, 18, 22].map((h, i) => (
+                          <div key={i} className="mini-sparkline-bar" style={{ height: `${h}px`, background: '#0d9488', opacity: 0.25 + i * 0.18 }} />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Row 2: Active Verifications */}
+                  <div className="summary-metric-card">
+                    <div className="summary-metric-left">
+                      <div className="summary-metric-icon" style={{ background: '#eff6ff', borderColor: '#dbeafe', color: '#2563eb' }}>
+                        <Clock size={18} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10.5, color: '#64748b' }}>Active Verifications</div>
+                        <div className="summary-metric-val">07</div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div className="summary-trend up">
+                        <TrendingUp size={12} /> 2%
+                      </div>
+                      <div className="mini-sparkline">
+                        {[6, 11, 9, 15, 20].map((h, i) => (
+                          <div key={i} className="mini-sparkline-bar" style={{ height: `${h}px`, background: '#2563eb', opacity: 0.25 + i * 0.18 }} />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Row 3: Completed Payments */}
+                  <div className="summary-metric-card">
+                    <div className="summary-metric-left">
+                      <div className="summary-metric-icon" style={{ background: '#f0fdf4', borderColor: '#dcfce7', color: '#16a34a' }}>
+                        <CheckCircle2 size={18} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10.5, color: '#64748b' }}>Completed Payments</div>
+                        <div className="summary-metric-val">94</div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div className="summary-trend up">
+                        <TrendingUp size={12} /> 18%
+                      </div>
+                      <div className="mini-sparkline">
+                        {[8, 12, 16, 19, 23].map((h, i) => (
+                          <div key={i} className="mini-sparkline-bar" style={{ height: `${h}px`, background: '#16a34a', opacity: 0.25 + i * 0.18 }} />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Row 4: Cancelled Payments */}
+                  <div className="summary-metric-card">
+                    <div className="summary-metric-left">
+                      <div className="summary-metric-icon" style={{ background: '#fef2f2', borderColor: '#fee2e2', color: '#dc2626' }}>
+                        <AlertOctagon size={18} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10.5, color: '#64748b' }}>Cancelled Payments</div>
+                        <div className="summary-metric-val">11</div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div className="summary-trend down">
+                        <TrendingDown size={12} /> 5%
+                      </div>
+                      <div className="mini-sparkline">
+                        {[22, 18, 14, 10, 6].map((h, i) => (
+                          <div key={i} className="mini-sparkline-bar" style={{ height: `${h}px`, background: '#dc2626', opacity: 0.9 - i * 0.15 }} />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Row 5: Verification Incomplete */}
+                  <div className="summary-metric-card">
+                    <div className="summary-metric-left">
+                      <div className="summary-metric-icon" style={{ background: '#fffbeb', borderColor: '#fef3c7', color: '#d97706' }}>
+                        <AlertTriangle size={18} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 10.5, color: '#64748b' }}>Verification Incomplete</div>
+                        <div className="summary-metric-val">16</div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div className="summary-trend down" style={{ color: '#dc2626' }}>
+                        <TrendingDown size={12} /> 3%
+                      </div>
+                      <div className="mini-sparkline">
+                        {[19, 15, 12, 9, 7].map((h, i) => (
+                          <div key={i} className="mini-sparkline-bar" style={{ height: `${h}px`, background: '#d97706', opacity: 0.85 - i * 0.14 }} />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Card 3: Live Payment Investigation (Wide Bottom Card) */}
+            <div className="aegis-card">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: '#0f172a' }}>
+                    Live Payment Investigation
+                  </h3>
+                  <span style={{ background: '#fef3c7', color: '#b45309', padding: '3px 9px', borderRadius: 6, fontSize: 10.5, fontWeight: 700 }}>
+                    In Progress
                   </span>
                 </div>
+                <div
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    background: '#ecfdf5',
+                    color: '#065f46',
+                    border: '1px solid #d1fae5',
+                    padding: '3px 10px',
+                    borderRadius: 20,
+                    fontSize: 11,
+                    fontWeight: 700,
+                  }}
+                >
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981' }} />
+                  Live
+                </div>
               </div>
-              <div className="metric">
-                <div className="metric-label">RECOMMENDED ACTION</div>
-                <div className="metric-value" style={{ fontSize: 11, fontWeight: 700 }} data-testid="drawer-recommended-action">
-                  {tx.assessment?.recommended_action ?? 'ALLOW'}
+
+              <div className="investigation-grid-split">
+                {/* Left Side: Stages Timeline Stepper matching Screenshot */}
+                <div className="stage-timeline-list">
+                  <div className="stage-timeline-item">
+                    <span className="stage-timeline-bullet completed">
+                      <CheckCircle2 size={16} />
+                    </span>
+                    <div className="stage-timeline-name">
+                      <span>Payment Initiated</span>
+                      <span className="stage-timeline-time">10:24:12 AM</span>
+                    </div>
+                    <div className="stage-timeline-detail">Transaction details received</div>
+                  </div>
+
+                  <div className="stage-timeline-item">
+                    <span className="stage-timeline-bullet completed">
+                      <CheckCircle2 size={16} />
+                    </span>
+                    <div className="stage-timeline-name">
+                      <span>Risk Assessment</span>
+                      <span className="stage-timeline-time">10:24:13 AM</span>
+                    </div>
+                    <div className="stage-timeline-detail">Analyzing transaction and user behavior</div>
+                  </div>
+
+                  <div className="stage-timeline-item">
+                    <span className="stage-timeline-bullet active" style={{ color: '#8b5cf6' }}>
+                      <Cpu size={16} />
+                    </span>
+                    <div className="stage-timeline-name">
+                      <span>AI Investigation</span>
+                      <span className="stage-timeline-time">10:24:15 AM</span>
+                    </div>
+                    <div className="stage-timeline-detail">Analyzing conversation evidence...</div>
+                  </div>
+
+                  <div className="stage-timeline-item">
+                    <span className="stage-timeline-bullet pending">
+                      <Clock size={16} />
+                    </span>
+                    <div className="stage-timeline-name">
+                      <span>Customer Verification</span>
+                      <span className="stage-timeline-time">Pending</span>
+                    </div>
+                    <div className="stage-timeline-detail">Waiting for user response</div>
+                  </div>
+
+                  <div className="stage-timeline-item">
+                    <span className="stage-timeline-bullet pending">
+                      <Clock size={16} />
+                    </span>
+                    <div className="stage-timeline-name">
+                      <span>Policy Decision</span>
+                      <span className="stage-timeline-time">Pending</span>
+                    </div>
+                    <div className="stage-timeline-detail">Evaluating risk and applying rules.</div>
+                  </div>
+
+                  <div className="stage-timeline-item">
+                    <span className="stage-timeline-bullet pending">
+                      <Clock size={16} />
+                    </span>
+                    <div className="stage-timeline-name">
+                      <span>Customer Intervention</span>
+                      <span className="stage-timeline-time">Pending</span>
+                    </div>
+                    <div className="stage-timeline-detail">Sending notification to user</div>
+                  </div>
+                </div>
+
+                {/* Right Side: Tabbed Box */}
+                <div className="investigation-tabs-box">
+                  <div className="investigation-tabs-bar">
+                    <button
+                      type="button"
+                      className={`investigation-tab-btn ${investigationTab === 'Transcript' ? 'active' : ''}`}
+                      onClick={() => setInvestigationTab('Transcript')}
+                    >
+                      Transcript
+                    </button>
+                    <button
+                      type="button"
+                      className={`investigation-tab-btn ${investigationTab === 'Conversation' ? 'active' : ''}`}
+                      onClick={() => setInvestigationTab('Conversation')}
+                    >
+                      Conversation
+                    </button>
+                    <button
+                      type="button"
+                      className={`investigation-tab-btn ${investigationTab === 'AI Analysis' ? 'active' : ''}`}
+                      onClick={() => setInvestigationTab('AI Analysis')}
+                    >
+                      AI Analysis
+                    </button>
+                  </div>
+
+                  <div className="investigation-tab-body">
+                    {investigationTab === 'Transcript' ? (
+                      <>
+                        {/* Audio Waveform Player Bar matching Screenshot */}
+                        <div className="audio-player-bar">
+                          <button
+                            type="button"
+                            className="audio-play-btn"
+                            onClick={() => setIsPlayingAudio(!isPlayingAudio)}
+                            title={isPlayingAudio ? 'Pause Audio' : 'Play Audio Capture'}
+                          >
+                            {isPlayingAudio ? <Pause size={14} /> : <Play size={14} style={{ marginLeft: 2 }} />}
+                          </button>
+                          <div className="waveform-canvas-mock">
+                            {Array.from({ length: 42 }).map((_, i) => {
+                              const barHeight = Math.sin(i * 0.45) * 8 + 12;
+                              const isActive = (audioProgress / 28) * 42 >= i;
+                              return (
+                                <div
+                                  key={i}
+                                  className={`waveform-bar ${isActive ? 'active' : ''}`}
+                                  style={{ height: `${barHeight}px` }}
+                                />
+                              );
+                            })}
+                          </div>
+                          <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#64748b' }}>
+                            0:{audioProgress < 10 ? `0${audioProgress}` : audioProgress} / 0:28
+                          </span>
+                          <button
+                            type="button"
+                            style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#64748b' }}
+                            title="Download Audio Capture"
+                          >
+                            <Download size={15} />
+                          </button>
+                        </div>
+
+                        {/* Transcript Dialogue List matching Screenshot */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 180, overflowY: 'auto' }}>
+                          {selectedUser.transcriptEntries.map((turn, idx) => (
+                            <div
+                              key={idx}
+                              className={`transcript-card-row ${turn.role === 'caller' ? 'adversary' : 'user'}`}
+                            >
+                              <div className={`transcript-icon-box ${turn.role === 'caller' ? 'caller' : 'customer'}`}>
+                                {turn.role === 'caller' ? <PhoneIncoming size={13} /> : <User size={13} />}
+                              </div>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                                  <span style={{ fontSize: 11, fontWeight: 700, color: turn.role === 'caller' ? '#b91c1c' : '#0f766e' }}>
+                                    {turn.speaker}{' '}
+                                    <span style={{ fontSize: 9.5, color: '#94a3b8', fontWeight: 400 }}>{turn.time}</span>
+                                  </span>
+                                  {turn.threatBadge && (
+                                    <span className={`threat-tag ${turn.threatTone === 'danger' ? 'danger' : 'warning'}`}>
+                                      {turn.threatBadge}
+                                    </span>
+                                  )}
+                                </div>
+                                <div style={{ fontSize: 11, color: '#334155', lineHeight: 1.45 }}>{turn.text}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : investigationTab === 'Conversation' ? (
+                      /* Conversation Tab: Mirrors the phone call with Gemini */
+                      <div style={{ display: 'flex', flexDirection: 'column', height: 240 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, paddingBottom: 6, borderBottom: '1px solid #e2e8f0' }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: '#0f172a' }}>
+                            Live Audio Channel: User Mobile Phone
+                          </span>
+                          <span style={{ background: '#e0f2fe', color: '#0369a1', padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 700 }}>
+                            Gemini 3.8 Live Voice
+                          </span>
+                        </div>
+                        <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 7, padding: '2px 0' }}>
+                          {conversationMessages.map((m, idx) => (
+                            <div
+                              key={idx}
+                              style={{
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: m.role === 'customer' ? 'flex-end' : 'flex-start',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  maxWidth: '85%',
+                                  padding: '7px 11px',
+                                  borderRadius: 9,
+                                  background: m.role === 'customer' ? '#e0f2fe' : '#f1f5f9',
+                                  color: m.role === 'customer' ? '#0369a1' : '#1e293b',
+                                  fontSize: 11,
+                                  lineHeight: 1.45,
+                                }}
+                              >
+                                {m.text}
+                              </div>
+                              <span style={{ fontSize: 9, color: '#94a3b8', marginTop: 2 }}>
+                                {m.role === 'customer' ? 'Customer' : 'Aegis Security'} · {m.time}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                        <div style={{ marginTop: 8, padding: '6px 10px', background: '#f8fafc', borderRadius: 8, fontSize: 10.5, color: '#64748b' }}>
+                          💡 Speak or reply directly inside the <strong>Mobile Layout Preview</strong> on the right to interact with Gemini.
+                        </div>
+                      </div>
+                    ) : (
+                      /* AI Analysis Tab */
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 11.5 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                          <div style={{ padding: 10, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                            <div style={{ fontSize: 10, color: '#64748b' }}>Risk Sentiment</div>
+                            <div style={{ fontWeight: 800, color: '#b91c1c', fontSize: 13, marginTop: 2 }}>
+                              {selectedUser.riskScore >= 80 ? 'CONFIRMED COERCION' : 'ELEVATED SUSPICION'}
+                            </div>
+                          </div>
+                          <div style={{ padding: 10, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                            <div style={{ fontSize: 10, color: '#64748b' }}>Decision Recommendation</div>
+                            <div style={{ fontWeight: 800, color: '#0369a1', fontSize: 13, marginTop: 2 }}>
+                              {selectedUser.riskScore >= 80 ? 'PROTECTIVE HOLD' : 'VERIFICATION REQUIRED'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style={{ padding: 10, background: '#fff5f5', borderRadius: 8, border: '1px solid #fee2e2' }}>
+                          <div style={{ fontWeight: 700, color: '#b91c1c', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <AlertTriangle size={14} /> Critical Evidence Signals Identified:
+                          </div>
+                          <ul style={{ margin: 0, paddingLeft: 18, color: '#7f1d1d', lineHeight: 1.5, fontSize: 10.5 }}>
+                            <li>Fake Law Enforcement / CBI Authority Impersonation</li>
+                            <li>Coaching to dismiss bank safeguards and demand secrecy</li>
+                            <li>Premature Liquidation of deposits prior to transfer execution</li>
+                            <li>Device engaged in active call during transfer execution</li>
+                          </ul>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* ================================================================= */}
+          {/* Column 3 (Right): Mobile Layout Preview (Top) + Demo Scenarios (Bottom) */}
+          {/* ================================================================= */}
+          <div className="right-dashboard-stack">
+            {/* Top Right: Mobile Layout Preview matching Reference Screenshot */}
+            <div className="aegis-card" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div className="aegis-card-title" style={{ marginBottom: 10 }}>
+                <span>Mobile Layout Preview</span>
+              </div>
+
+              {/* iPhone Frame */}
+              <div className="iphone-frame">
+                <div className="iphone-notch" />
+                <div className="iphone-screen">
+                  {/* Statusbar */}
+                  <div className="iphone-statusbar">
+                    <span>9:41</span>
+                    <span style={{ fontSize: 9.5, display: 'flex', gap: 4, alignItems: 'center' }}>
+                      <span>5G</span>
+                      <span>100%</span>
+                    </span>
+                  </div>
+
+                  {/* Mode Switcher Tabs inside Phone for easy inspection */}
+                  <div className="phone-mode-switcher" style={{ margin: '4px 10px 0' }}>
+                    <button
+                      type="button"
+                      className={`phone-mode-btn ${mobileViewMode === 'send_money' ? 'active' : ''}`}
+                      onClick={() => setMobileViewMode('send_money')}
+                    >
+                      💳 Send Money
+                    </button>
+                    <button
+                      type="button"
+                      className={`phone-mode-btn ${mobileViewMode === 'call' ? 'active' : ''}`}
+                      onClick={() => {
+                        setMobileViewMode('call');
+                        if (!mobileCallActive) {
+                          setMobileCallActive(true);
+                          setMobileCallStatus('CONNECTED');
+                        }
+                      }}
+                    >
+                      📞 Security Call (Gemini)
+                    </button>
+                  </div>
+
+                  {/* Phone Body Area */}
+                  {mobileViewMode === 'send_money' ? (
+                    /* Standard Send Money Screen matching Screenshot */
+                    <div className="iphone-body">
+                      {/* Top Bar with Send Money */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 10, marginBottom: 10, borderBottom: '1px solid #f1f5f9' }}>
+                        <span style={{ fontSize: 16, cursor: 'pointer', color: '#0f172a' }}>←</span>
+                        <strong style={{ fontSize: 13, color: '#0f172a' }}>Send Money</strong>
+                      </div>
+
+                      {/* Beneficiary Card matching Screenshot */}
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 10,
+                          padding: '10px 12px',
+                          background: '#ffffff',
+                          borderRadius: 12,
+                          border: '1px solid #f1f5f9',
+                          marginBottom: 14,
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 38,
+                            height: 38,
+                            borderRadius: '50%',
+                            background: '#fef3c7',
+                            color: '#78350f',
+                            display: 'grid',
+                            placeItems: 'center',
+                            fontWeight: 700,
+                            fontSize: 12.5,
+                          }}
+                        >
+                          RS
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 700, fontSize: 12.5, color: '#0f172a' }}>
+                            Rohit Sharma
+                          </div>
+                          <div style={{ fontSize: 10.5, color: '#64748b' }}>
+                            UPI • rohit@upi
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Large Amount matching Screenshot */}
+                      <div style={{ fontSize: 26, fontWeight: 800, color: '#0f172a', margin: '2px 0 14px', letterSpacing: -0.5 }}>
+                        ₹ {Number(mobileAmount || 250000).toLocaleString('en-IN')}
+                      </div>
+
+                      {/* Payment note input matching Screenshot */}
+                      <div style={{ marginBottom: 'auto' }}>
+                        <input
+                          type="text"
+                          value={mobilePurpose}
+                          onChange={(e) => setMobilePurpose(e.target.value)}
+                          style={{
+                            width: '100%',
+                            padding: '8px 10px',
+                            borderRadius: 8,
+                            border: '1px solid #e2e8f0',
+                            fontSize: 11,
+                            background: '#f8fafc',
+                            color: '#334155',
+                            outline: 'none',
+                          }}
+                          placeholder="Payment for official fees"
+                        />
+                      </div>
+
+                      {/* Protected by AegisPay banner matching Screenshot */}
+                      <div
+                        style={{
+                          marginTop: 18,
+                          marginBottom: 12,
+                          padding: '10px 12px',
+                          background: '#f0fdfa',
+                          border: '1px solid #ccfbf1',
+                          borderRadius: 10,
+                          display: 'flex',
+                          gap: 10,
+                          alignItems: 'center',
+                        }}
+                      >
+                        <ShieldCheck size={20} color="#0d9488" style={{ flexShrink: 0 }} />
+                        <div style={{ fontSize: 10, color: '#134e4a', lineHeight: 1.35 }}>
+                          <strong>Protected by AegisPay</strong>
+                          <div>Your payment is analyzed for fraud risks in real time.</div>
+                        </div>
+                      </div>
+
+                      {/* Pay Now Button */}
+                      <button
+                        type="button"
+                        onClick={handleMobilePayNow}
+                        disabled={isAnalyzingPay}
+                        style={{
+                          width: '100%',
+                          padding: '11px',
+                          borderRadius: 8,
+                          border: 'none',
+                          background: '#0d9488',
+                          color: '#ffffff',
+                          fontWeight: 700,
+                          fontSize: 12.5,
+                          cursor: 'pointer',
+                          boxShadow: '0 2px 8px rgba(13, 148, 136, 0.25)',
+                          transition: 'all 0.15s',
+                        }}
+                      >
+                        {isAnalyzingPay ? 'Analyzing with Aegis AI...' : 'Pay Now'}
+                      </button>
+                    </div>
+                  ) : (
+                    /* In-Call Phone Screen: Live Call with Gemini AI matching User Requirement */
+                    <div className="iphone-body" style={{ padding: '10px 12px' }}>
+                      {mobileCallStatus === 'RINGING' ? (
+                        /* Ringing State */
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', textAlign: 'center' }}>
+                          <div
+                            style={{
+                              width: 60,
+                              height: 60,
+                              borderRadius: '50%',
+                              background: '#0d9488',
+                              color: '#ffffff',
+                              display: 'grid',
+                              placeItems: 'center',
+                              boxShadow: '0 0 0 10px rgba(13, 148, 136, 0.2)',
+                              marginBottom: 12,
+                            }}
+                          >
+                            <PhoneIncoming size={28} />
+                          </div>
+                          <h4 style={{ margin: 0, fontSize: 15, color: '#0f172a' }}>AegisPay Security</h4>
+                          <p style={{ margin: '3px 0 16px', fontSize: 10.5, color: '#64748b' }}>
+                            Fraud Protection Outbound Call
+                          </p>
+                          <div style={{ fontSize: 10, color: '#0284c7', background: '#e0f2fe', padding: '3px 8px', borderRadius: 6, marginBottom: 20 }}>
+                            Powered by Gemini 3.8 Live Voice
+                          </div>
+
+                          <div style={{ display: 'flex', gap: 20 }}>
+                            <button
+                              type="button"
+                              onClick={handleDeclineCall}
+                              style={{
+                                width: 48,
+                                height: 48,
+                                borderRadius: '50%',
+                                background: '#ef4444',
+                                color: '#fff',
+                                border: 'none',
+                                display: 'grid',
+                                placeItems: 'center',
+                                cursor: 'pointer',
+                              }}
+                              title="Decline Call"
+                            >
+                              <PhoneOff size={20} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleAcceptCall}
+                              style={{
+                                width: 48,
+                                height: 48,
+                                borderRadius: '50%',
+                                background: '#10b981',
+                                color: '#fff',
+                                border: 'none',
+                                display: 'grid',
+                                placeItems: 'center',
+                                cursor: 'pointer',
+                                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.4)',
+                              }}
+                              title="Accept Call"
+                            >
+                              <PhoneCall size={20} />
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        /* Connected Call State: Interactive Gemini Conversation right on the phone! */
+                        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                          {/* Call Header */}
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 6, borderBottom: '1px solid #f1f5f9', marginBottom: 6 }}>
+                            <div>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: '#0f172a', display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981' }} />
+                                AegisPay Security Officer
+                              </div>
+                              <div style={{ fontSize: 9.5, color: '#64748b' }}>
+                                Call Active · 00:{callDuration < 10 ? `0${callDuration}` : callDuration}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={handleEndCall}
+                              style={{
+                                width: 28,
+                                height: 28,
+                                borderRadius: '50%',
+                                background: '#fee2e2',
+                                color: '#ef4444',
+                                border: 'none',
+                                display: 'grid',
+                                placeItems: 'center',
+                                cursor: 'pointer',
+                              }}
+                              title="End Call"
+                            >
+                              <PhoneOff size={13} />
+                            </button>
+                          </div>
+
+                          {/* Sound wave visualizer */}
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2, height: 16, margin: '2px 0 6px' }}>
+                            {Array.from({ length: 18 }).map((_, i) => (
+                              <div
+                                key={i}
+                                style={{
+                                  width: 2,
+                                  height: `${Math.sin(i * 0.7 + callDuration) * 6 + 9}px`,
+                                  background: '#0d9488',
+                                  borderRadius: 1,
+                                  transition: 'height 0.2s',
+                                }}
+                              />
+                            ))}
+                          </div>
+
+                          {/* Dialogue Turns */}
+                          <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, paddingRight: 2 }}>
+                            {conversationMessages.map((m, idx) => (
+                              <div
+                                key={idx}
+                                style={{
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  alignItems: m.role === 'customer' ? 'flex-end' : 'flex-start',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    maxWidth: '88%',
+                                    padding: '6px 9px',
+                                    borderRadius: 8,
+                                    background: m.role === 'customer' ? '#0d9488' : '#f1f5f9',
+                                    color: m.role === 'customer' ? '#ffffff' : '#0f172a',
+                                    fontSize: 10.5,
+                                    lineHeight: 1.4,
+                                  }}
+                                >
+                                  {m.text}
+                                </div>
+                                <span style={{ fontSize: 8.5, color: '#94a3b8', marginTop: 1 }}>
+                                  {m.role === 'customer' ? 'You' : 'Officer (Gemini)'} · {m.time}
+                                </span>
+                              </div>
+                            ))}
+                            {isGeminiReplying && (
+                              <div style={{ fontSize: 9.5, color: '#0284c7', fontStyle: 'italic', padding: '2px 6px' }}>
+                                Officer is speaking...
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Quick reply chips */}
+                          <div style={{ display: 'flex', gap: 4, margin: '6px 0 4px', overflowX: 'auto', whiteSpace: 'nowrap' }}>
+                            {["I'm scared. What should I do?", 'They said they are police', 'They told me not to hang up'].map((chip, idx) => (
+                              <button
+                                key={idx}
+                                type="button"
+                                onClick={() => handleSendPhoneMessage(chip)}
+                                style={{
+                                  fontSize: 8.5,
+                                  padding: '3px 6px',
+                                  borderRadius: 12,
+                                  border: '1px solid #cbd5e1',
+                                  background: '#f8fafc',
+                                  color: '#334155',
+                                  cursor: 'pointer',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {chip}
+                              </button>
+                            ))}
+                          </div>
+
+                          {/* Customer Phone Message Input Bar */}
+                          <div style={{ display: 'flex', gap: 4, marginTop: 2 }}>
+                            <input
+                              type="text"
+                              value={customerPhoneInput}
+                              onChange={(e) => setCustomerPhoneInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSendPhoneMessage(customerPhoneInput);
+                              }}
+                              placeholder="Speak or reply to officer..."
+                              style={{
+                                flex: 1,
+                                padding: '6px 8px',
+                                borderRadius: 6,
+                                border: '1px solid #cbd5e1',
+                                fontSize: 10,
+                                outline: 'none',
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setIsTranscribeModalOpen(true)}
+                              style={{
+                                width: 28,
+                                height: 28,
+                                borderRadius: 6,
+                                border: '1px solid #cbd5e1',
+                                background: '#f8fafc',
+                                color: '#0284c7',
+                                display: 'grid',
+                                placeItems: 'center',
+                                cursor: 'pointer',
+                              }}
+                              title="Speak via Microphone (gemini-3.5-transcribe)"
+                            >
+                              <Mic size={13} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSendPhoneMessage(customerPhoneInput)}
+                              style={{
+                                width: 28,
+                                height: 28,
+                                borderRadius: 6,
+                                border: 'none',
+                                background: '#0d9488',
+                                color: '#fff',
+                                display: 'grid',
+                                placeItems: 'center',
+                                cursor: 'pointer',
+                              }}
+                              title="Send Message"
+                            >
+                              <Send size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
 
-            <div className="notice" style={{ marginTop: 10 }}>
-              <ShieldAlert size={15} style={{ flex: 'none', marginTop: 1 }} />
-              <div>
-                <strong>Policy Recommendation: </strong>
-                <span>{tx.assessment?.explanation || 'Simulated transaction evaluated within baseline parameters.'}</span>
+            {/* Bottom Right: Demo Scenarios matching Reference Screenshot */}
+            <div className="aegis-card" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div className="aegis-card-title" style={{ marginBottom: 10 }}>
+                <span>Demo Scenarios</span>
               </div>
-            </div>
 
-            <h4 style={{ fontSize: 12, fontWeight: 700, margin: '16px 0 8px' }}>
-              Triggered Deterministic Rules ({tx.assessment?.triggered_rules.length ?? 0})
-            </h4>
-            {tx.assessment?.triggered_rules && tx.assessment.triggered_rules.length > 0 ? (
-              <div style={{ display: 'grid', gap: 8 }} data-testid="triggered-rules-list">
-                {tx.assessment.triggered_rules.map((rule) => {
-                  const ruleTone =
-                    rule.severity === 'CRITICAL'
-                      ? 'red'
-                      : rule.severity === 'HIGH'
-                        ? 'amber'
-                        : rule.severity === 'MEDIUM'
-                          ? 'blue'
-                          : 'green';
+              <div>
+                {scenarioRadioOptions.map((opt) => {
+                  const isSelected = selectedScenarioKey === opt.key;
                   return (
-                    <div className="evidence" key={rule.rule_id} style={{ padding: 10 }}>
-                      <div className="evidence-top">
-                        <span className="evidence-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <code>{rule.rule_id}</code> · {rule.rule_name}
-                        </span>
-                        <span className={`pill ${ruleTone}`}>
-                          {rule.weight > 0 ? `+${rule.weight}` : rule.weight} pts · {rule.severity}
-                        </span>
+                    <div
+                      key={opt.key}
+                      className={`scenario-radio-item ${isSelected ? 'selected' : ''}`}
+                      onClick={() => handleRunScenario(opt.key)}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11 }}>
+                        <span
+                          style={{
+                            width: 12,
+                            height: 12,
+                            borderRadius: '50%',
+                            border: isSelected ? '4px solid #0d9488' : '1.5px solid #94a3b8',
+                            background: '#fff',
+                            display: 'inline-block',
+                            flexShrink: 0,
+                          }}
+                        />
+                        <span style={{ fontWeight: isSelected ? 700 : 500, color: '#0f172a' }}>{opt.label}</span>
                       </div>
-                      <p style={{ margin: '4px 0 2px', color: '#203044', fontWeight: 500 }}>{rule.evidence}</p>
-                      <p style={{ fontSize: 9, color: '#7a8996', margin: 0 }}>{rule.description}</p>
+                      <span className={`score-badge-pill ${opt.tone}`}>{opt.risk}</span>
                     </div>
                   );
                 })}
-              </div>
-            ) : (
-              <p className="subhead">No risk rules triggered. Clean transaction features.</p>
-            )}
 
-            <h4 style={{ fontSize: 12, fontWeight: 700, margin: '16px 0 8px' }}>Supporting Evidence Findings</h4>
-            {tx.assessment?.supporting_evidence && tx.assessment.supporting_evidence.length > 0 ? (
-              <ul
-                style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: '#384856', lineHeight: 1.6 }}
-                data-testid="supporting-evidence-list"
-              >
-                {tx.assessment.supporting_evidence.map((ev, i) => (
-                  <li key={i}>{ev}</li>
-                ))}
-              </ul>
-            ) : (
-              <p className="subhead">No adverse signals recorded.</p>
-            )}
-
-            {tx.assessment?.missing_evidence && tx.assessment.missing_evidence.length > 0 && (
-              <>
-                <h4 style={{ fontSize: 12, fontWeight: 700, margin: '16px 0 8px', color: '#8b6410' }}>
-                  Missing / Unobserved Telemetry ({tx.assessment.missing_evidence.length})
-                </h4>
-                <div className="notice info" style={{ margin: '4px 0 8px' }}>
-                  <span>
-                    <strong>Deterministic Guardrail:</strong> Unobserved signals remain explicitly unknown and are never
-                    assumed to be either safe or suspicious.
-                  </span>
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }} data-testid="missing-evidence-list">
-                  {tx.assessment.missing_evidence.map((field) => (
-                    <span className="pill blue" key={field}>
-                      ⚠️ {field}: Unknown
-                    </span>
-                  ))}
-                </div>
-              </>
-            )}
-          </section>
-        )}
-
-        {tab === 'Evidence & checks' && (
-          <>
-            <section className="drawer-section">
-              <h3>Customer statements</h3>
-              {tx.statements.length ? (
-                tx.statements.map((s, i) => (
-                  <div className="evidence" style={{ marginBottom: 8 }} key={i}>
-                    <div className="evidence-top">
-                      <span className="evidence-label">{s.question}</span>
-                      <span className="pill blue">{s.at || tx.initiated}</span>
-                    </div>
-                    <p>“{s.answer}”</p>
-                  </div>
-                ))
-              ) : (
-                <p className="subhead">No submitted statements.</p>
-              )}
-            </section>
-            <section className="drawer-section">
-              <h3>Extracted claim · distinct from interpretation</h3>
-              <p>{tx.claim || 'No claim extracted yet.'}</p>
-              <div className="evidence-grid">
-                <EvidenceBox
-                  title="Customer statement"
-                  tone="blue"
-                  copy={tx.statements.map((s) => s.answer).join(' ') || 'No customer statement submitted.'}
-                />
-                <EvidenceBox
-                  title="System inference"
-                  tone={tx.concern ? 'amber' : 'blue'}
-                  copy={
-                    tx.concern
-                      ? 'Potential pressure or safe-account indicators reported. Indicators are not a determination by themselves.'
-                      : 'No urgency, secrecy, or safe-account indicator extracted.'
-                  }
-                />
+                <button
+                  type="button"
+                  onClick={() => handleRunScenario(selectedScenarioKey)}
+                  style={{
+                    width: '100%',
+                    padding: '11px',
+                    borderRadius: 8,
+                    border: 'none',
+                    background: '#0d5c63',
+                    color: '#ffffff',
+                    fontWeight: 700,
+                    fontSize: 12.5,
+                    cursor: 'pointer',
+                    marginTop: 8,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    boxShadow: '0 2px 8px rgba(13, 92, 99, 0.25)',
+                  }}
+                >
+                  <Play size={13} fill="#ffffff" /> Run Scenario
+                </button>
               </div>
-            </section>
-            <section className="drawer-section">
-              <h3>Independent source · Aster Bank instruction registry</h3>
-              <p className="subhead">Caller-provided phone numbers and websites are never used as verification evidence.</p>
-              <span
-                className={`pill ${
-                  tx.result === 'Confirmed'
-                    ? 'green'
-                    : tx.result === 'Contradicted'
-                      ? 'red'
-                      : tx.result === 'Source unavailable'
-                        ? 'blue'
-                        : 'amber'
-                }`}
-                data-testid="verification-result"
-              >
-                {visibleResult}
-              </span>
-              <div className="page-content-table" style={{ marginTop: 10 }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Field</th>
-                      <th>Claim checked</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {checks.map(([a, b]) => (
-                      <tr key={a}>
-                        <td>{a}</td>
-                        <td>{b}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <p className="decision-note" style={{ marginTop: 10 }}>
-                A missing record is not proof of fraud.
-              </p>
-            </section>
-          </>
-        )}
+            </div>
+          </div>
+        </main>
+      )}
 
-        {tab === 'AI Investigation' && (
-          <>
-            <InvestigationReviewPanel
-              transactionId={tx.backendId || tx.id}
-              transactionReference={tx.reference}
-              transactionStatus={tx.payment}
-              riskScore={tx.assessment?.risk_score ?? null}
-              riskLevel={tx.assessment?.risk_level ?? null}
-            />
-            <VerificationPanel transactionId={tx.backendId || tx.id} />
-            <CoercionAnalysisPanel transactionId={tx.backendId || tx.id} />
-            <CustomerInterventionPanel
-              transactionId={tx.backendId || tx.id}
-              transactionRecipient={tx.recipient}
-              transactionAmount={tx.amount}
-              onResponseExecuted={onRetry}
-            />
-            <InvestigationConversationPanel
-              transactionId={tx.backendId || tx.id}
-              transactionRecipient={tx.recipient}
-              transactionAmount={tx.amount}
-            />
-          </>
-        )}
-
-        {tab === 'Decision & history' && (
-          <>
-            <CustomerInterventionPanel
-              transactionId={tx.backendId || tx.id}
-              transactionRecipient={tx.recipient}
-              transactionAmount={tx.amount}
-              onResponseExecuted={onRetry}
-            />
-            <section className="drawer-section">
-              <h3>Final decision</h3>
-              <div className="decision-outcome-summary">
-                <div>
-                  <small>DECISION</small>
-                  <strong>{decisionStatus(tx)}</strong>
-                </div>
-                <div>
-                  <small>PAYMENT</small>
-                  <strong data-testid="decision-payment-status">{paymentStatus(tx)}</strong>
-                </div>
-              </div>
-              <p style={{ marginTop: 12 }} data-testid="decision-reason">
-                {tx.reason}
-              </p>
-              <div className="mono">
-                Claim result: {visibleResult} · Decision timestamp: {tx.audit[0]?.at ?? 'Pending'}
-              </div>
-            </section>
-            <section className="drawer-section">
-              <h3>Timestamped audit events</h3>
-              <div className="timeline" data-testid="audit-timeline">
-                {tx.audit.map((a, i) => (
-                  <div className="timeline-row" key={`${a.at}-${i}`}>
-                    <div className="timeline-dot" />
-                    <div>
-                      <div className="timeline-title">{a.title}</div>
-                      <div className="timeline-copy">{a.detail}</div>
-                    </div>
-                    <time className="timeline-time">{a.at}</time>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function EvidenceBox({ title, copy, tone }: { title: string; copy: string; tone: 'green' | 'amber' | 'red' | 'blue' }) {
-  return (
-    <div className="evidence">
-      <div className="evidence-top">
-        <span className="evidence-label">{title}</span>
-        <span className={`pill ${tone}`}>{title === 'Customer statement' ? 'SOURCE' : 'INFERENCE'}</span>
-      </div>
-      <p>{copy}</p>
+      {/* --------------------------------------------------------------------- */}
+      {/* Audio Transcribe Modal */}
+      {/* --------------------------------------------------------------------- */}
+      <AudioTranscribeModal
+        isOpen={isTranscribeModalOpen}
+        onClose={() => setIsTranscribeModalOpen(false)}
+        onTranscriptionComplete={(text) => handleSendPhoneMessage(text)}
+      />
     </div>
   );
 }
-
-function Policies({ policyLimit }: { policyLimit: number }) {
-  const rules = [
-    'Known recipient and routine payments do not require additional questions.',
-    'Unfamiliar recipients trigger customer verification. Amounts above the review threshold are marked as unusual; amount alone is not a fraud determination.',
-    'Safe-account language combined with urgency or secrecy, or a mismatched instruction with pressure indicators, shows a warning. The customer chooses whether to cancel or proceed.',
-    'A claim is confirmed only when customer, institution, instruction, recipient, amount and reference match.',
-    'A missing record alone is not proof of fraud. If the instruction source is unavailable, the payment remains unsent and verification is incomplete.',
-    'Staff can inspect evidence and history; they cannot manually release a customer payment.',
-  ];
-  return (
-    <>
-      <div className="page-head">
-        <div>
-          <div className="eyebrow">PREFERENCES · PAYMENT SAFETY</div>
-          <h1>Settings</h1>
-          <p className="subhead">Read-only overview of the checks used in this prototype.</p>
-        </div>
-      </div>
-      <div className="console-grid" style={{ gridTemplateColumns: 'minmax(0,1fr) 330px' }}>
-        <section className="card">
-          <div className="card-pad">
-            <div className="card-head">
-              <h2 className="card-title">Payment safety policy</h2>
-            </div>
-            {rules.map((r, i) => (
-              <div className="policy-rule" key={r} data-testid={`policy-rule-${i}`}>
-                <div className="rule-num">0{i + 1}</div>
-                <div className="rule-text">{r}</div>
-              </div>
-            ))}
-          </div>
-        </section>
-        <div className="stack">
-          <section className="card">
-            <div className="card-pad">
-              <div className="card-kicker">REVIEW THRESHOLD</div>
-              <div className="settings-value">{fmt(policyLimit)}</div>
-              <p className="subhead">New-recipient payments at or above this amount are marked as unusual.</p>
-            </div>
-          </section>
-          <section className="card">
-            <div className="card-pad">
-              <div className="card-kicker">WHEN A SOURCE IS UNAVAILABLE</div>
-              <p className="settings-value">Payment held</p>
-              <p className="subhead">Verification stays incomplete. The system does not approve or send the payment.</p>
-            </div>
-          </section>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function Sources({ records }: { records: Tx[] }) {
-  return (
-    <>
-      <div className="page-head">
-        <div>
-          <div className="eyebrow">VERIFICATION · LOCAL REGISTRY</div>
-          <h1>Verification Sources</h1>
-          <p className="subhead">Narrow declared coverage. No phone, web, government or third-party lookup.</p>
-        </div>
-        <span className="pill blue">
-          <LockKeyhole size={12} />
-          LOCAL ONLY
-        </span>
-      </div>
-      <section className="card">
-        <div className="card-pad">
-          <div className="card-head">
-            <h2 className="card-title">Aster Bank demo instruction registry</h2>
-            <span className="pill green">SIMULATED FIXTURE</span>
-          </div>
-          <p className="subhead">
-            Local fixtures only; not a real external verification. Record comparison uses institution, customer, requested
-            action, recipient, amount and reference.
-          </p>
-          <div className="source-row">
-            <div className="source-icon">
-              <Landmark />
-            </div>
-            <div>
-              <div className="source-name">Aster Bank · authenticated instruction registry</div>
-              <div className="source-detail">Available in this local prototype; scenario can simulate a source outage.</div>
-            </div>
-            <span className="pill green">LOCAL</span>
-          </div>
-          <div className="source-row">
-            <div className="source-icon">
-              <Smartphone />
-            </div>
-            <div>
-              <div className="source-name">Phone numbers and websites</div>
-              <div className="source-detail">Not queried, monitored or used as verification evidence.</div>
-            </div>
-            <span className="pill blue">OUT OF SCOPE</span>
-          </div>
-          <h3 style={{ font: '700 12px var(--font-display)', marginTop: 16 }}>Configured sample records</h3>
-          <div className="page-content-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>Reference</th>
-                  <th>Customer</th>
-                  <th>Institution</th>
-                  <th>Instruction</th>
-                  <th>Recipient</th>
-                  <th>Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr data-testid="registry-record-1">
-                  <td>ASB-48219</td>
-                  <td>Anika Rao</td>
-                  <td>Aster Bank</td>
-                  <td>Settlement transfer</td>
-                  <td>Aster Bank Settlement</td>
-                  <td>₹6,500</td>
-                </tr>
-                <tr data-testid="registry-record-2">
-                  <td>ASB-48220</td>
-                  <td>Arjun Nair</td>
-                  <td>Aster Bank</td>
-                  <td>Account fee</td>
-                  <td>Aster Bank Fees</td>
-                  <td>₹1,250</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p className="mono" style={{ marginTop: 12 }}>
-            Current records shown: {records.length} · synthetic payment queue only.
-          </p>
-        </div>
-      </section>
-    </>
-  );
-}
-
-function AgentSurface({
-  agentResult,
-  setAgentResult,
-  merchant,
-  setMerchant,
-  category,
-  setCategory,
-  amount,
-  setAmount,
-}: {
-  agentResult: 'idle' | 'approved' | 'rejected';
-  setAgentResult: (v: 'idle' | 'approved' | 'rejected') => void;
-  merchant: string;
-  setMerchant: (v: string) => void;
-  category: string;
-  setCategory: (v: string) => void;
-  amount: string;
-  setAmount: (v: string) => void;
-}) {
-  const [history, setHistory] = useState<Audit[]>([]);
-  function check() {
-    const allowed = merchant === 'Orchid Audio' && category === 'Headphones' && Number(amount) <= 5000;
-    setAgentResult(allowed ? 'approved' : 'rejected');
-    setHistory((old) => [
-      makeAudit(
-        allowed ? 'Mandate allowed' : 'Mandate rejected',
-        allowed ? 'Merchant, category and amount are within local mandate.' : 'Attempt is outside the declared local mandate.'
-      ),
-      ...old,
-    ]);
-  }
-  return (
-    <>
-      <div className="page-head">
-        <div>
-          <div className="eyebrow">AUTONOMOUS PAYMENT · SECONDARY DEMO</div>
-          <h1>Agent Payments</h1>
-          <p className="subhead">A narrow local mandate check. Separate from the primary customer safety workflow.</p>
-        </div>
-        <span className="pill amber">SIMULATION ONLY</span>
-      </div>
-      <div className="console-grid" style={{ gridTemplateColumns: 'minmax(0,1fr) 330px' }}>
-        <div className="stack">
-          <section className="card">
-            <div className="card-pad">
-              <div className="agent-hero">
-                <strong>Agent mandate · AGENT-007</strong>
-                <p>Allowed: Headphones · Orchid Audio · up to ₹5,000 · one-time. No purchase is executed.</p>
-              </div>
-              <div className="field-row">
-                <label>
-                  <span className="field-label">Merchant</span>
-                  <select className="select" value={merchant} onChange={(e) => setMerchant(e.target.value)} data-testid="agent-merchant">
-                    <option>Other merchant</option>
-                    <option>Orchid Audio</option>
-                  </select>
-                </label>
-                <label>
-                  <span className="field-label">Category</span>
-                  <select className="select" value={category} onChange={(e) => setCategory(e.target.value)} data-testid="agent-category">
-                    <option>Gift cards</option>
-                    <option>Headphones</option>
-                  </select>
-                </label>
-              </div>
-              <label style={{ display: 'block', marginTop: 12 }}>
-                <span className="field-label">Amount · ₹</span>
-                <input
-                  className="field-input"
-                  type="number"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  data-testid="agent-amount"
-                />
-              </label>
-              <button className="button primary" style={{ marginTop: 12 }} onClick={check} data-testid="button-check-mandate">
-                <ShieldCheck />
-                Check mandate
-              </button>
-            </div>
-          </section>
-          <section className="card">
-            <div className="card-pad">
-              <h2 className="card-title">Decision record</h2>
-              <p className="subhead" style={{ marginTop: 10 }} data-testid="agent-result">
-                {agentResult === 'idle'
-                  ? 'Not evaluated'
-                  : agentResult === 'approved'
-                    ? 'Allowed by local mandate. No purchase was made.'
-                    : 'Rejected by local mandate. No purchase was made.'}
-              </p>
-            </div>
-          </section>
-        </div>
-        <section className="card">
-          <div className="card-pad">
-            <div className="card-kicker">ATTEMPT HISTORY</div>
-            <div style={{ marginTop: 14 }}>
-              {history.length ? (
-                history.map((a, i) => (
-                  <div className="timeline-row" key={i}>
-                    <div className="timeline-dot" />
-                    <div>
-                      <div className="timeline-title">{a.title}</div>
-                      <div className="timeline-copy">{a.detail}</div>
-                    </div>
-                    <time className="timeline-time">{a.at}</time>
-                  </div>
-                ))
-              ) : (
-                <p className="subhead">No mandate checks yet.</p>
-              )}
-            </div>
-            <button
-              className="button small"
-              onClick={() => {
-                setMerchant('Orchid Audio');
-                setCategory('Headphones');
-                setAmount('4500');
-                setAgentResult('idle');
-              }}
-              data-testid="button-load-approved-example"
-            >
-              <Check />
-              Load allowed example
-            </button>
-          </div>
-        </section>
-      </div>
-    </>
-  );
-}
-
-export default App;

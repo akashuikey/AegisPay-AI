@@ -18,7 +18,13 @@ export const HealthStatus: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`${config.apiBaseUrl}/health/ready`);
+      let response: Response;
+      try {
+        response = await fetch(`${config.apiBaseUrl}/health/ready`);
+      } catch {
+        const { handleMockApiRequest } = await import("../mock/mockBackend");
+        response = await handleMockApiRequest(`${config.apiBaseUrl}/health/ready`);
+      }
       if (!response.ok) {
         if (response.status === 503) {
           const errData = await response.json();

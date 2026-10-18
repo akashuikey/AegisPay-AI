@@ -15,6 +15,7 @@
  */
 
 import { SCENARIO_CATALOG, evaluateRiskLocally } from '../api/riskApi';
+import { RECIPIENT_REGISTRY, resolveRecipient } from '../domain/recipientRegistry';
 
 // ---------------------------------------------------------------------------
 // Types & Interfaces
@@ -243,6 +244,58 @@ export const SCENARIO_LIST = [
     exercises_coercion_analysis: false,
     exercises_verification: true,
   },
+  {
+    id: 'ordinary_stressed_customer',
+    version: '1.0.0',
+    title: 'Ordinary Stressed Customer (No Coercion)',
+    description:
+      'A customer who sounds stressed on the phone call but provides a legitimate, unpressured explanation. Voice stress alone must not trigger protective hold.',
+    transaction: {
+      amount: '45000.00',
+      currency: 'INR',
+      payment_rail: 'IMPS',
+      recipient_name: 'Apollo Healthcare Supplies',
+      recipient_identifier: 'apollo.pharmacy@axis',
+      purpose: 'Urgent medical supplies',
+    },
+    expectation: {
+      policy_action: 'REQUIRE_VERIFICATION',
+      final_state: 'VERIFICATION_REQUIRED',
+      response_type: 'VERIFICATION_REQUIRED',
+      customer_action_required: 'VERIFY_OTP',
+      limitations: [
+        'Acoustic voice stress is an advisory indicator only; it does not constitute standalone proof of coercion or fraud.',
+      ],
+    },
+    exercises_coercion_analysis: true,
+    exercises_verification: true,
+  },
+  {
+    id: 'strong_coercion_after_verification',
+    version: '1.0.0',
+    title: 'Strong Coercion After Verification',
+    description:
+      'Customer passed OTP verification, but severe real-time duress cues and authority threats emerge during the security officer call. Safe hold maintained.',
+    transaction: {
+      amount: '180000.00',
+      currency: 'INR',
+      payment_rail: 'RTGS',
+      recipient_name: 'Cyber Police Verification Escrow',
+      recipient_identifier: 'cyber.police.escrow@pnb',
+      purpose: 'Verification bond deposit',
+    },
+    expectation: {
+      policy_action: 'HOLD_FOR_INVESTIGATION',
+      final_state: 'HELD_FOR_VERIFICATION',
+      response_type: 'HOLD_PROTECTIVE',
+      customer_action_required: 'CONTACT_BANK',
+      limitations: [
+        'Passing 2FA does not release funds when active duress and extortion markers are independently established.',
+      ],
+    },
+    exercises_coercion_analysis: true,
+    exercises_verification: true,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -458,31 +511,29 @@ function buildScenarioRun(scenarioId: string, executionMode: string): { run: Sce
 }
 
 // ---------------------------------------------------------------------------
-// Mock Fetch Interceptor
+// Mock Request Handler & Dispatcher
 // ---------------------------------------------------------------------------
 
-export function initMockBackend(): void {
-  if (typeof window === 'undefined') return;
+export async function handleMockApiRequest(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+  const url = new URL(rawUrl, origin);
+  const pathname = url.pathname;
+  const method = (init?.method || 'GET').toUpperCase();
 
-  const originalFetch = window.fetch;
+  // Check if this is an API call intended for the backend
+  const isBackendCall =
+    pathname.startsWith('/api/v1/') ||
+    pathname.startsWith('/health/') ||
+    pathname.startsWith('/api/') ||
+    rawUrl.includes(':8000/api/v1/') ||
+    rawUrl.includes(':8000/health/');
 
-  window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-    const url = new URL(rawUrl, window.location.origin);
-    const pathname = url.pathname;
-    const method = (init?.method || 'GET').toUpperCase();
+  if (!isBackendCall && typeof window !== 'undefined' && typeof window.fetch === 'function') {
+    return window.fetch(input, init);
+  }
 
-    // Check if this is an API call intended for the backend
-    const isBackendCall =
-      pathname.startsWith('/api/v1/') ||
-      pathname.startsWith('/health/') ||
-      rawUrl.includes(':8000/api/v1/') ||
-      rawUrl.includes(':8000/health/');
-
-    if (!isBackendCall) {
-      return originalFetch(input, init);
-    }
-
+  try {
     let bodyData: any = {};
     if (init?.body) {
       try {
@@ -530,9 +581,47 @@ export function initMockBackend(): void {
       });
     }
 
-    // 3. Risk Engine
+    // 3. Recipient Intelligence Registry (20 seeded accounts)
+    if (pathname === '/api/v1/recipients' && method === 'GET') {
+      return jsonResponse({
+        total: RECIPIENT_REGISTRY.length,
+        items: RECIPIENT_REGISTRY,
+      });
+    }
+
+    if (pathname === '/api/v1/recipients/resolve') {
+      const upi = url.searchParams.get('upi') || bodyData.upi_id || '';
+      return jsonResponse(resolveRecipient(upi));
+    }
+
+    // 4. Risk Engine (Wired with Recipient Intelligence)
     if (pathname === '/api/v1/risk/evaluate' && method === 'POST') {
-      const assessment = evaluateRiskLocally(bodyData);
+      const evidence = { ...bodyData };
+      if (evidence.recipient_identifier) {
+        const resolved = resolveRecipient(evidence.recipient_identifier);
+        if (evidence.is_trusted_beneficiary === undefined) {
+          evidence.is_trusted_beneficiary = resolved.is_trusted_beneficiary;
+        }
+        if (evidence.is_first_time_recipient === undefined) {
+          evidence.is_first_time_recipient = !resolved.is_trusted_beneficiary;
+        }
+        if (evidence.is_flagged_mule === undefined) {
+          evidence.is_flagged_mule = resolved.is_flagged_mule;
+        }
+        if (evidence.fan_in_count_24h === undefined) {
+          evidence.fan_in_count_24h = resolved.fan_in_count_24h;
+        }
+        if (evidence.fan_out_count_24h === undefined) {
+          evidence.fan_out_count_24h = resolved.fan_out_count_24h;
+        }
+        if (evidence.payee_name_mismatch === undefined) {
+          evidence.payee_name_mismatch = resolved.payee_name_mismatch;
+        }
+        if (evidence.routing_mismatch === undefined) {
+          evidence.routing_mismatch = resolved.routing_mismatch;
+        }
+      }
+      const assessment = evaluateRiskLocally(evidence);
       return jsonResponse(assessment);
     }
 
@@ -1172,5 +1261,18 @@ export function initMockBackend(): void {
 
     // Fallback for any other API route
     return jsonResponse({ message: 'Success (Simulated)' });
-  };
+  } catch (err) {
+    console.warn('Mock request handling error:', err);
+    return new Response(JSON.stringify({ error: 'Internal mock error' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+}
+
+export function initMockBackend(): void {
+  // Deterministic in-browser mock backend service ready
+  if (typeof console !== 'undefined') {
+    console.log('[AegisPay AI] In-browser mock backend ready.');
+  }
 }

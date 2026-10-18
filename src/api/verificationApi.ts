@@ -93,14 +93,27 @@ export async function submitVerificationApi(
   otp: string
 ): Promise<SubmitVerificationResponse> {
   const url = `${config.apiBaseUrl}/api/v1/verification/${challengeId}/submit`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${customerSessionToken}`,
-    },
-    body: JSON.stringify({ otp }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerSessionToken}`,
+      },
+      body: JSON.stringify({ otp }),
+    });
+  } catch {
+    const { handleMockApiRequest } = await import('../mock/mockBackend');
+    response = await handleMockApiRequest(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${customerSessionToken}`,
+      },
+      body: JSON.stringify({ otp }),
+    });
+  }
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }

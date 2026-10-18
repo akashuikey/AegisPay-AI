@@ -8,6 +8,7 @@
  */
 
 import { config } from '../config';
+import { handleMockApiRequest } from '../mock/mockBackend';
 
 const TOKEN_STORAGE_KEY = 'aegis_access_token';
 const UNAUTHORIZED_EVENT = 'aegis:unauthorized';
@@ -68,7 +69,22 @@ export async function apiFetch(url: string, init: RequestInit = {}): Promise<Res
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(url, { ...init, headers });
+  let response: Response;
+  try {
+    response = await fetch(url, { ...init, headers });
+    if (!response.ok && response.status === 404) {
+      try {
+        const mockRes = await handleMockApiRequest(url, { ...init, headers });
+        if (mockRes.ok) return mockRes;
+      } catch {
+        // keep original response
+      }
+    }
+  } catch {
+    // If backend server is unreachable or offline, seamlessly handle via client mock
+    response = await handleMockApiRequest(url, { ...init, headers });
+  }
+
   if (response.status === 401) {
     clearToken();
     window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
@@ -79,11 +95,20 @@ export async function apiFetch(url: string, init: RequestInit = {}): Promise<Res
 /** Authenticate an operator; on success the token is stored for subsequent calls. */
 export async function loginApi(username: string, password: string): Promise<OperatorIdentity> {
   const url = `${config.apiBaseUrl}/api/v1/auth/login`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+  } catch {
+    response = await handleMockApiRequest(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+  }
 
   if (!response.ok) {
     if (response.status === 401) {

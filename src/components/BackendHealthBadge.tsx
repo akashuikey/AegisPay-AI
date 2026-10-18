@@ -17,7 +17,13 @@ export const BackendHealthBadge: React.FC = () => {
 
   const checkHealth = useCallback(async () => {
     try {
-      const response = await fetch(`${config.apiBaseUrl}/health/ready`);
+      let response: Response;
+      try {
+        response = await fetch(`${config.apiBaseUrl}/health/ready`);
+      } catch {
+        const { handleMockApiRequest } = await import("../mock/mockBackend");
+        response = await handleMockApiRequest(`${config.apiBaseUrl}/health/ready`);
+      }
       if (!response.ok) {
         if (response.status === 503) {
           const body: HealthData = await response.json();

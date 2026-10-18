@@ -12,7 +12,13 @@ interface AppConfig {
   appName: string;
 }
 
+// Safe environment lookup supporting both Vite client (import.meta.env) and Node server (process.env)
+const env =
+  (typeof import.meta !== 'undefined' && (import.meta as Record<string, any>).env) ||
+  (typeof process !== 'undefined' && process.env) ||
+  {};
+
 export const config: AppConfig = {
-  apiBaseUrl: import.meta.env.VITE_API_BASE_URL || "",
+  apiBaseUrl: (env.VITE_API_BASE_URL as string) || "",
   appName: "AegisPay AI",
 };
