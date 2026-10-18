@@ -1,0 +1,6 @@
+{
+  "name": "AegisPay AI",
+  "description": "AegisPay AI is a simulated real-time banking fraud and coercion prevention platform safeguarding push payments through pre-authorization risk scoring and contextual multi-modal investigations.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
